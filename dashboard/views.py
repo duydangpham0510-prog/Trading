@@ -721,6 +721,11 @@ def stock_list(request: HttpRequest) -> HttpResponse:
             "pb": s.pb,
             "f_score": s.f_score,
             "profit_growth": getattr(s, 'profit_growth', None),
+            # Fair Value (from sync_service) - tính toán trong view
+            "fv_daily": getattr(a, 'fv_daily', 0) or 0,
+            "fv_weekly": getattr(a, 'fv_weekly', 0) or 0,
+            "valuation_status": getattr(a, 'valuation_status', 'N/A'),
+            "intrinsic_value": getattr(a, 'intrinsic_value', 0),
             # Analysis
             "master_score": a.master_score,
             "technical_score": a.technical_score,
@@ -819,12 +824,12 @@ def export_stocks_csv(request: HttpRequest) -> HttpResponse:
     writer.writerow([
         "Symbol", "Company", "Industry", "Market Group", "Price", "Change%", "Volume (B)", "Volume Ratio",
         "RSI", "ADX", "CMF", "ATR", "MFI", "SMA10", "SMA20", "SMA50", "VWAP", "Ichimoku", "SuperTrend",
-        "ROE", "P/E", "P/B", "F-Score", "Profit Growth",
+        "ROE", "P/E", "P/B", "F-Score", "Profit Growth", "Profit Growth Note", "Is New Listing",
         "Master Score", "Base Score", "Market Weight", "Tech Score", "Fund Score", "Signal",
         "Target Yield %", "R:R Ratio", "Hard Risk %", "Est. Days", "Timeframe", "Trend Factor",
         "Entry", "Stop Loss", "Take Profit", "Support Price", "Profit/Day",
         "FV Daily", "FV Weekly", "Valuation Status",
-        "Is Vetoed", "Veto Reason", "Is Fast Pick", "Is Safe Entry", "Has High Resistance",
+        "VETO Label", "Is Vetoed", "Veto Reason", "Is Fast Pick", "Is Safe Entry", "Has High Resistance",
         "Foreign Streak", "Foreign Bonus", "Industry Perf", "Is Industry Leader",
         "Is Market High Risk", "Stock Risk Level", "Stock Risk Reason",
         "Market RSI", "Trend", "Breakout Status"
@@ -864,15 +869,23 @@ def export_stocks_csv(request: HttpRequest) -> HttpResponse:
         if market_rsi > 75:
             fv_weekly = round(fv_weekly * 0.9, 2)
 
-        # Valuation Status
-        valuation_status = "Rẻ" if price_val < fv_weekly else "Đắt"
-
+        # Valuation Status - Nếu VETO thì hiển thị RISK
+        if a.is_vetoed:
+            valuation_status = "RISK"
+        else:
+            valuation_status = "Rẻ" if price_val < fv_weekly else "Đắt"
+        
+        # VETO label
+        veto_label = "🚫 VETOED" if a.is_vetoed else ""
+        
         writer.writerow([
             s.symbol, s.company_name, s.industry or s.get_industry(), s.market_group or s.get_market_group(),
             s.price, s.change_percent,
             f"{avg_vol_b:.1f}", s.volume_ratio,
             s.rsi, s.adx, s.cmf, s.atr, s.mfi, s.sma_10, s.sma_20, s.sma_50, s.vwap, s.ichimoku_status, s.supertrend_signal,
-            s.roe, s.pe, s.pb, s.f_score, getattr(s, 'profit_growth', None),
+            s.roe, s.pe, s.pb, s.f_score, 
+            getattr(s, 'profit_growth', None), getattr(s, 'profit_growth_note', 'N/A'), 
+            "Yes" if getattr(s, 'is_new_listing', False) else "No",
             a.master_score, getattr(a, 'base_master_score', a.master_score), getattr(a, 'market_weight', 0),
             a.technical_score, a.fundamental_score, a.signal,
             getattr(a, 'target_yield_pct', 0) or round((a.take_profit - (a.entry_price or s.price)) / (a.entry_price or s.price) * 100, 2) if a.take_profit and (a.entry_price or s.price) > 0 else 0,
@@ -880,7 +893,7 @@ def export_stocks_csv(request: HttpRequest) -> HttpResponse:
             a.estimated_days_to_target, a.timeframe_label, getattr(a, 'trend_factor', 0.6),
             a.entry_price, a.stop_loss, a.take_profit, getattr(a, 'support_price', 0), a.expected_profit_per_day,
             fv_daily, fv_weekly, valuation_status,
-            "Yes" if a.is_vetoed else "No", a.veto_reason,
+            veto_label, "Yes" if a.is_vetoed else "No", a.veto_reason,
             "Yes" if a.is_fast_pick else "No",
             "Yes" if getattr(a, 'is_safe_entry', False) else "No",
             "Yes" if getattr(a, 'has_high_resistance', False) else "No",
@@ -912,6 +925,11 @@ def export_stock_detail_csv(request: HttpRequest, symbol: str) -> HttpResponse:
     response["Content-Disposition"] = f'attachment; filename="{symbol}_detail_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv"'
 
     writer = csv.writer(response)
+
+    # Section 0: VETO WARNING (nếu có)
+    if analysis.is_vetoed:
+        writer.writerow(["🚫 VETOED", analysis.veto_reason or "Lý do không xác định"])
+        writer.writerow([])
 
     # Section 1: THÔNG TIN CƠ BẢN
     writer.writerow(["=== THÔNG TIN CƠ BẢN ==="])
@@ -959,8 +977,11 @@ def export_stock_detail_csv(request: HttpRequest, symbol: str) -> HttpResponse:
     if market_rsi > 75:
         fv_weekly = round(fv_weekly * 0.9, 2)
 
-    # Valuation Status
-    valuation_status = "Rẻ" if price_val < fv_weekly else "Đắt"
+    # Valuation Status - Nếu VETO thì hiển thị RISK
+    if analysis.is_vetoed:
+        valuation_status = "RISK"
+    else:
+        valuation_status = "Rẻ" if price_val < fv_weekly else "Đắt"
 
     writer.writerow(["FV Trong Ngày (Daily)", fv_daily])
     writer.writerow(["FV Trong Tuần (Weekly)", fv_weekly])

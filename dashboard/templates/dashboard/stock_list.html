@@ -801,6 +801,8 @@
                     data-pb="{{ stock.pb }}"
                     data-fscore="{{ stock.f_score }}"
                     data-profit-growth="{{ stock.profit_growth|default:'' }}"
+                    data-fv-daily="{{ stock.fv_daily|floatformat:0 }}"
+                    data-fv-weekly="{{ stock.fv_weekly|floatformat:0 }}"
                     data-trend="{{ stock.trend }}"
                     data-sma10="{{ stock.sma_10 }}"
                     data-sma20="{{ stock.sma_20 }}"
@@ -838,6 +840,16 @@
                     data-support-price="{{ stock.support_price|default:'0' }}"
                     data-atr="{{ stock.atr|default:1000 }}"
                     data-breakout="{{ stock.breakout_status|default:'WAIT' }}"
+                    {% if stock.is_vetoed %}
+                    data-final-group="VETO"
+                    {% elif stock.master_score >= 70 %}
+                    data-final-group="GOLD"
+                    {% elif stock.master_score >= 55 %}
+                    data-final-group="GUERRILLA"
+                    {% else %}
+                    data-final-group="RISK"
+                    {% endif %}
+                    data-final-score="{{ stock.master_score }}"
                     onclick="openStockModalFromRow(this)">
                     
                     <td>{{ forloop.counter }}</td>
@@ -1015,151 +1027,29 @@
             console.log(`[Data Normalize] Đã chuẩn hóa ${rows.length} dòng dữ liệu`);
         }
 
-        // ========== WEALTH GUARD LOGIC - BỘ NÃO TÍNH ĐIỂM ==========
+        // ========== WEALTH GUARD LOGIC - DISPLAY ONLY (Backend is Source of Truth) ==========
         function processStockRow(row) {
-            // Lấy dữ liệu từ row.dataset (đã chuẩn hóa ở Bước 1)
-            const marketRsi = parseFloat(row.dataset.marketRsi) || 50;
-            const roe = parseFloat(row.dataset.roe) || 0;
-            const fscore = parseInt(row.dataset.fscore) || 0;
-            const ichimoku = row.dataset.ichimoku || 'neutral'; // ichimoku status từ backend
-            const bbPos = parseFloat(row.dataset.bbPos) || 50;
-            const volRatio = parseFloat(row.dataset.volRatio) || 1.0;
-            const smaTrend = row.dataset.smaTrend || 'neutral';
-            const ichimokuTk = row.dataset.ichimokuTk || 'neutral'; // Tenkan vs Kijun comparison
-            const pe = parseFloat(row.dataset.pe) || 999;
-            const rr = parseFloat(row.dataset.rr) || 0;
-            
-            // Các chỉ báo khác
-            const supertrendSignal = row.dataset.supertrendSignal || 'neutral';
-            const vwapStatus = row.dataset.vwapStatus || 'neutral';
-            const rsi = parseFloat(row.dataset.rsi) || 50;
-            const mfi = parseFloat(row.dataset.mfi) || 50;
-            const cmf = parseFloat(row.dataset.cmf) || 0;
-            
-            // ========== HỆ THỐNG VETO (KIM BÀI MIỄN TỬ) ==========
-            let isVeto = false;
-            let vetoReasons = [];
-            
-            if (marketRsi >= 80) {
-                isVeto = true;
-                vetoReasons.push('MKT quá mua');
-            }
-            if (roe < 15) {
-                isVeto = true;
-                vetoReasons.push('ROE thấp');
-            }
-            if (fscore < 5) {
-                isVeto = true;
-                vetoReasons.push('F-Score yếu');
-            }
-            if (ichimoku === 'bearish') {
-                isVeto = true;
-                vetoReasons.push('Ichimoku giảm');
-            }
-            if (bbPos > 105) {
-                isVeto = true;
-                vetoReasons.push('BB quá mua');
-            }
-            if (volRatio < 0.5) {
-                isVeto = true;
-                vetoReasons.push('KL giao dịch thấp');
-            }
-            if (smaTrend === 'bearish') {
-                isVeto = true;
-                vetoReasons.push('SMA giảm');
-            }
-            if (ichimokuTk === 'bearish') {
-                isVeto = true;
-                vetoReasons.push('TK-KJ giảm');
-            }
-            
-            // ========== CHẤM ĐIỂM KỸ THUẬT (tScore) ==========
-            let tScore = 0;
-            
-            // Trạng thái (+65 điểm tối đa)
-            if (ichimoku === 'bullish' || ichimokuTk === 'bullish') tScore += 15;
-            if (supertrendSignal === 'buy') tScore += 10;
-            if (vwapStatus === 'above') tScore += 10;
-            if (smaTrend === 'perfect') tScore += 20;
-            if (ichimokuTk === 'bullish') tScore += 10; // tkCross bullish
-            
-            // Xung lực (+60 điểm tối đa)
-            // RSI zones
-            if (rsi >= 45 && rsi <= 65) tScore += 10;
-            else if (rsi >= 40 && rsi <= 75) tScore += 5;
-            
-            // MFI
-            if (mfi > 50) tScore += 10;
-            else if (mfi > 30) tScore += 5;
-            
-            // CMF
-            if (cmf > 0.1) tScore += 15;
-            
-            // Volume Ratio
-            if (volRatio >= 1.5) tScore += 20;
-            
-            // Bollinger Position
-            if (bbPos >= 30 && bbPos <= 70) tScore += 15;
-            
-            // ========== CHẤM ĐIỂM CƠ BẢN (fScore) ==========
-            let fundScore = 0;
-            
-            // ROE
-            if (roe >= 25) fundScore += 50;
-            else if (roe >= 18) fundScore += 30;
-            else fundScore += 10;
-            
-            // F-Score
-            if (fscore >= 7) fundScore += 40;
-            else if (fscore >= 5) fundScore += 20;
-            // else + 0
-            
-            // P/E
-            if (pe <= 15) fundScore += 10;
-            
-            // ========== TÍNH MASTER SCORE ==========
-            let marketWeight = 1.0;
-            if (marketRsi <= 25) {
-                marketWeight = 1.2; // Thị trường quá bán -> tăng trọng số
-            }
-            
-            let masterScore = (fundScore * 0.4 + tScore * 0.6) * marketWeight;
-            masterScore = Math.min(masterScore, 100);
-            
-            // Nếu dính Veto -> Score tối đa = 10
-            if (isVeto) {
-                masterScore = Math.min(masterScore, 10);
-            }
-            
-            // ========== XÁC ĐỊNH NHÓM CHIẾN THUẬT ==========
-            let group = 'RISK';
-            
-            if (isVeto) {
-                group = 'VETO';
-            } else if (roe >= 25 && masterScore >= 80) {
-                group = 'GOLD';
-            } else if (rr >= 1.5 && masterScore >= 60) {
-                group = 'GUERRILLA';
-            } else {
-                group = 'RISK';
-            }
-            
-            // ========== CẬP NHẬT DATA ATTRIBUTES ==========
-            row.setAttribute('data-final-score', Math.round(masterScore));
-            row.setAttribute('data-final-group', group);
-            row.setAttribute('data-veto-reasons', vetoReasons.join('; '));
-            row.setAttribute('data-t-score', Math.round(tScore));
-            row.setAttribute('data-f-score-calc', Math.round(fundScore));
-            row.setAttribute('data-is-veto', isVeto ? 'true' : 'false');
+            // Chỉ đọc dữ liệu từ data attributes (đã được Backend tính toán)
+            const masterScore = parseInt(row.dataset.finalScore) || parseInt(row.dataset.masterScore) || 0;
+            const isVeto = row.dataset.isVeto === 'true';
+            const signal = row.dataset.signal || 'WAIT';
+            const group = row.dataset.finalGroup || determineGroup(masterScore, isVeto);
             
             return {
-                masterScore: Math.round(masterScore),
-                group: group,
-                isVeto: isVeto,
-                vetoReasons: vetoReasons,
-                tScore: Math.round(tScore),
-                fundScore: Math.round(fundScore)
+                masterScore,
+                isVeto,
+                signal,
+                group,
+                tScore: parseInt(row.dataset.techScore) || 0,
+                fundScore: parseInt(row.dataset.fundScore) || 0
             };
+        }
+        
+        function determineGroup(score, isVeto) {
+            if (isVeto || score <= 10) return 'VETO';
+            if (score >= 70) return 'GOLD';
+            if (score >= 55) return 'GUERRILLA';
+            return 'RISK';
         }
         
         function applyWealthGuardLogic() {
@@ -1420,53 +1310,26 @@ if (scoreCell) {
             }
         }
         function runWealthGuardMaster() {
-    const rows = document.querySelectorAll('table tbody tr[data-symbol]');
-    rows.forEach(row => {
-        const d = row.dataset;
-        // 1. Ép kiểu và xử lý dữ liệu rỗng (Bổ sung quan trọng)
-        const price = parseFloat(d.price) || 0;
-        const vwap = parseFloat(d.vwap) || price;
-        const sma10 = parseFloat(d.sma10) || price;
-        const tp = parseFloat(d.tp) || (price * 1.05);
-        const pb = parseFloat(d.pb) || 1;
-        const pe = parseFloat(d.pe) || 10;
-        const marketRsi = parseFloat(d.marketRsi) || 50;
-
-        const config = INDUSTRY_CONFIG[d.industry] || INDUSTRY_CONFIG['Default'];
-
-        // 2. Tính FV Ngày (Daily) - Công thức chuẩn 60/40
-        const fv_daily = (vwap * 0.6) + (sma10 * 0.4);
-        
-        // 3. Tính FV Tuần (Weekly) - Logic đa lớp
-        let intrinsic = (config.type === 'PB') 
-            ? (config.target / pb) * price 
-            : (config.target / pe) * price;
-
-        const fundS = parseFloat(d.fundScore) || 50;
-        const techS = parseFloat(d.techScore) || 50;
-        
-        // Trọng số linh hoạt giữa Kỹ thuật và Cơ bản
-        let fv_weekly = ((intrinsic * fundS) + (tp * techS)) / (fundS + techS);
-        
-        // 4. BỔ SUNG: Điều chỉnh "Biên an toàn" theo RSI thị trường
-        if (marketRsi > 75) fv_weekly *= 0.95; // Thị trường nóng quá thì hạ mục tiêu
-        if (marketRsi < 30) fv_weekly *= 1.05; // Thị trường quá bán thì nâng mục tiêu
-
-        // Hiển thị ra Table
-        const valCell = row.querySelector(`#val-${d.symbol}`);
-        if (valCell) {
-            valCell.querySelector('.fv-daily').textContent = `Day: ${Math.round(fv_daily).toLocaleString('vi-VN')}`;
-            valCell.querySelector('.fv-weekly').textContent = `Week: ${Math.round(fv_weekly).toLocaleString('vi-VN')}`;
-            
-            // Màu sắc cảnh báo: Nếu giá hiện tại < Định giá tuần -> Chữ màu xanh
-            valCell.querySelector('.fv-weekly').style.color = (price < fv_weekly) ? "#22c55e" : "#ef4444";
+            // Chỉ đọc FV từ data attributes (Backend đã tính)
+            const rows = document.querySelectorAll('table tbody tr[data-symbol]');
+            rows.forEach(row => {
+                const d = row.dataset;
+                const price = parseFloat(d.price) || 0;
+                const fvWeekly = parseFloat(d.fvWeekly) || 0;
+                const fvDaily = parseFloat(d.fvDaily) || 0;
+                
+                // Hiển thị FV từ Backend
+                const valCell = row.querySelector(`#val-${d.symbol}`);
+                if (valCell) {
+                    valCell.querySelector('.fv-daily').textContent = `Day: ${Math.round(fvDaily).toLocaleString('vi-VN')}`;
+                    valCell.querySelector('.fv-weekly').textContent = `Week: ${Math.round(fvWeekly).toLocaleString('vi-VN')}`;
+                    
+                    // Màu sắc: Nếu giá < FV Weekly -> Xanh (Rẻ)
+                    valCell.querySelector('.fv-weekly').style.color = (price < fvWeekly && fvWeekly > 0) ? "#22c55e" : "#ef4444";
+                }
+            });
         }
 
-        // Lưu vào attribute để Modal sử dụng
-        row.setAttribute('data-fv-daily', fv_daily);
-        row.setAttribute('data-fv-weekly', fv_weekly);
-    });
-}
         function showModal(stockData) {
             // Populate modal header
             document.getElementById('modalSymbol').textContent = stockData.symbol;

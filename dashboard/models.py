@@ -132,7 +132,9 @@ class StockData(models.Model):
     pb = models.FloatField(null=True, blank=True)
     roe = models.FloatField(null=True, blank=True)
     f_score = models.IntegerField(default=0)
-    profit_growth = models.FloatField(null=True, blank=True)  # NEW: Tăng trưởng LN quý
+    profit_growth = models.FloatField(null=True, blank=True)  # Tăng trưởng LN quý (%)
+    profit_growth_note = models.CharField(max_length=20, default="N/A")  # YoY, QoQ_adj, TTM, NEW_LISTING
+    is_new_listing = models.BooleanField(default=False)  # Cổ phiếu mới (< 2 quý)
 
     # Meta
     updated_at = models.DateTimeField(auto_now=True)
@@ -232,6 +234,12 @@ class StockAnalysis(models.Model):
     # Criteria
     criteria_met = models.IntegerField(default=0)
     criteria_list = models.JSONField(default=list)
+
+    # Fair Value (v10)
+    fv_daily = models.FloatField(default=0)  # (VWAP * 0.4) + (SMA20 * 0.6)
+    fv_weekly = models.FloatField(default=0)  # Intrinsic-based formula
+    valuation_status = models.CharField(max_length=20, default="N/A")  # "Rẻ" or "Đắt"
+    intrinsic_value = models.FloatField(default=0)  # Base intrinsic value
 
     # Trend
     trend = models.CharField(max_length=20, default="SIDEWAYS")

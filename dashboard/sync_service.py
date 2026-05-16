@@ -82,7 +82,7 @@ def get_fundamental_data(symbol: str, fast_mode: bool = False) -> Dict[str, Any]
     """
     Lấy dữ liệu cơ bản từ vnstock_data (Unified API) hoặc vnstock fallback
     fast_mode: True = chỉ lấy ratio (nhanh), False = lấy đầy đủ (chậm hơn)
-    Returns: {roe, pe, pb, f_score, f_score_grade, profit_growth}
+    Returns: {roe, pe, pb, f_score, f_score_grade, profit_growth, profit_growth_note, is_new_listing}
     """
     result = {
         "roe": None,
@@ -91,7 +91,9 @@ def get_fundamental_data(symbol: str, fast_mode: bool = False) -> Dict[str, Any]
         "pe_industry_avg": None,  # P/E trung bình ngành
         "f_score": 0,
         "f_score_grade": "N/A",
-        "profit_growth": None,  # NEW: Quý gần nhất vs cùng kỳ năm trước
+        "profit_growth": None,  # Tăng trưởng LN (%)
+        "profit_growth_note": "N/A",  # Phương pháp tính: YoY, QoQ_adj, TTM, NEW_LISTING
+        "is_new_listing": False,  # Cổ phiếu mới (< 2 quý)
         "foreign_buy_streak": 0,
         "industry_performance": 0,
         "is_industry_leader": True,
@@ -180,7 +182,10 @@ def get_fundamental_data(symbol: str, fast_mode: bool = False) -> Dict[str, Any]
                 result['f_score_grade'] = get_f_score_grade(result['f_score'])
             else:
                 # Full mode: tính F-Score đầy đủ
-                result['profit_growth'] = calculate_profit_growth(symbol)
+                profit_growth_result = calculate_profit_growth(symbol)
+                result['profit_growth'] = profit_growth_result.get('profit_growth')
+                result['profit_growth_note'] = profit_growth_result.get('profit_growth_note', 'N/A')
+                result['is_new_listing'] = profit_growth_result.get('is_new_listing', False)
                 result['pe_industry_avg'] = get_industry_pe_average(symbol)
                 result['foreign_buy_streak'] = get_foreign_buy_streak(symbol)
                 result['industry_performance'] = get_industry_performance(symbol, None)
@@ -472,70 +477,165 @@ def get_industry_performance(symbol: str, df: pd.DataFrame, lookback: int = 5) -
         return 0
 
 
-def calculate_profit_growth(symbol: str) -> Optional[float]:
+def calculate_profit_growth(symbol: str) -> dict:
     """
-    Calculate profit growth: (LNST quý gần nhất / LNST quý cùng kỳ năm trước) - 1
-    Returns growth percentage or None if unavailable
+    Calculate profit growth với ưu tiên: TTM > YoY > QoQ
+    
+    Returns dict:
+    {
+        'profit_growth': float (growth percentage),
+        'profit_growth_note': str (method used: 'YoY', 'QoQ', 'TTM', 'NEW_LISTING'),
+        'is_new_listing': bool
+    }
+    
+    Priority:
+    1. TTM (Trailing Twelve Months) - ổn định nhất
+    2. YoY (Year-over-Year) - chính xác nhất
+    3. QoQ (Quarter-over-Quarter) với hệ số 0.8 - dự phòng
+    4. NEW_LISTING - cổ phiếu mới (< 2 quý dữ liệu)
     """
+    result = {
+        'profit_growth': None,
+        'profit_growth_note': 'N/A',
+        'is_new_listing': False
+    }
+    
     try:
-        from vnstock_data import Fundamental  # pyright: ignore[reportMissingImports]
+        from vnstock_data import Fundamental
+        import pandas as pd
         import warnings as w
         w.filterwarnings('ignore')
 
         fun = Fundamental()
         income = fun.equity(symbol).income_statement(limit=8)
 
-        if income is None or len(income) < 4:
-            return None
-
-        # Find net profit column
+        if income is None or len(income) == 0:
+            return result
+        
+        # Find net profit column - ưu tiên LN của cổ đông công ty mẹ
         net_profit_col = None
-        for col in income.columns:
-            col_lower = str(col).lower()
-            if ('net' in col_lower and 'profit' in col_lower) or 'lnst' in col_lower:
+        preferred_cols = [
+            'profit_after_tax_for_shareholders_of_parent_company',
+            'net_profit_after_tax',
+            'profit_before_tax'
+        ]
+        for col in preferred_cols:
+            if col in income.columns:
                 net_profit_col = col
                 break
+        
+        # Fallback: tìm bất kỳ cột nào có profit
+        if net_profit_col is None:
+            for col in income.columns:
+                col_lower = str(col).lower()
+                if ('net' in col_lower and 'profit' in col_lower) or 'lnst' in col_lower:
+                    net_profit_col = col
+                    break
 
         if net_profit_col is None:
-            return None
-
-        # Index 0 = newest, index 1 = prev quarter, index 4 = same quarter last year (roughly)
-        # Get quarter index from first row
-        latest_date = income.index[0]
-        latest_profit = income.loc[latest_date, net_profit_col]
-
-        if latest_profit is None or float(latest_profit) <= 0:
-            return None
-
-        # Find same quarter last year - iterate through rows to match quarter
-        import pandas as pd  # pyright: ignore[reportMissingImports]
-        if isinstance(latest_date, str):
-            latest_dt = pd.to_datetime(latest_date)
+            return result
+        
+        # Đếm số quý có dữ liệu hợp lệ
+        valid_quarters = 0
+        for idx in income.index:
+            val = income.loc[idx, net_profit_col]
+            if val is not None and not pd.isna(val) and float(val) > 0:
+                valid_quarters += 1
+        
+        # NEW_LISTING: < 2 quý dữ liệu
+        if valid_quarters < 2:
+            result['profit_growth'] = 0.001  # Không âm, không None
+            result['profit_growth_note'] = 'NEW_LISTING'
+            result['is_new_listing'] = True
+            return result
+        
+        # Hàm helper lấy giá trị
+        def get_profit(idx):
+            val = income.loc[idx, net_profit_col]
+            if val is None or pd.isna(val):
+                return None
+            try:
+                v = float(val)
+                return v if v > 0 else None
+            except:
+                return None
+        
+        latest_idx = income.index[0]
+        latest_profit = get_profit(latest_idx)
+        
+        if latest_profit is None:
+            return result
+        
+        # ========== METHOD 1: TTM (Trailing Twelve Months) ==========
+        # Tổng 4 quý gần nhất vs 4 quý trước
+        if valid_quarters >= 4:
+            ttm_current = 0
+            ttm_prev = 0
+            for i in range(4):
+                if i < len(income.index):
+                    val = get_profit(income.index[i])
+                    if val is not None:
+                        ttm_current += val
+            
+            for i in range(4, min(8, len(income))):
+                val = get_profit(income.index[i])
+                if val is not None:
+                    ttm_prev += val
+            
+            if ttm_current > 0 and ttm_prev > 0:
+                ttm_growth = ((ttm_current / ttm_prev) - 1) * 100
+                result['profit_growth'] = round(ttm_growth, 2)
+                result['profit_growth_note'] = 'TTM'
+                return result
+        
+        # ========== METHOD 2: YoY (Year-over-Year) ==========
+        # Tìm cùng kỳ năm trước (cách 4 quý)
+        if isinstance(latest_idx, str):
+            latest_dt = pd.to_datetime(latest_idx)
         else:
-            latest_dt = latest_date
-
+            latest_dt = latest_idx
+        
         same_quarter_last_year = None
         for i in range(1, min(5, len(income))):
-            row_date = income.index[i]
-            if isinstance(row_date, str):
-                row_dt = pd.to_datetime(row_date)
+            row_idx = income.index[i]
+            if isinstance(row_idx, str):
+                row_dt = pd.to_datetime(row_idx)
             else:
-                row_dt = row_date
-
-            # Check if same quarter (quarter number should match)
-            if (latest_dt.month // 4) == (row_dt.month // 4) and latest_dt.year == row_dt.year + 1:
-                same_quarter_last_year = income.loc[row_date, net_profit_col]
-                break
-
-        if same_quarter_last_year is None or float(same_quarter_last_year) <= 0:
-            return None
-
-        growth = (float(latest_profit) / float(same_quarter_last_year)) - 1
-        return round(growth * 100, 2)  # Return as percentage
+                row_dt = row_idx
+            
+            # Same quarter: cùng tháng trong quý
+            if (latest_dt.month - 1) // 3 == (row_dt.month - 1) // 3:
+                if latest_dt.year == row_dt.year + 1:
+                    same_quarter_last_year = get_profit(row_idx)
+                    break
+        
+        if same_quarter_last_year is not None:
+            yoy_growth = ((latest_profit / same_quarter_last_year) - 1) * 100
+            result['profit_growth'] = round(yoy_growth, 2)
+            result['profit_growth_note'] = 'YoY'
+            return result
+        
+        # ========== METHOD 3: QoQ với hệ số 0.8 ==========
+        # Chỉ dùng khi không có YoY
+        if valid_quarters >= 2:
+            prev_idx = income.index[1]
+            prev_profit = get_profit(prev_idx)
+            
+            if prev_profit is not None and prev_profit > 0:
+                qoq_growth = ((latest_profit / prev_profit) - 1) * 100
+                # Áp dụng hệ số 0.8 để tránh sai số mùa vụ
+                adjusted_growth = qoq_growth * 0.8
+                result['profit_growth'] = round(adjusted_growth, 2)
+                result['profit_growth_note'] = 'QoQ_adj'
+                return result
+        
+        # Fallback: không tính được
+        return result
 
     except Exception as e:
         pass
-    return None
+    
+    return result
 
 
 def calculate_f_score(symbol: str, fund_data: dict = None) -> int:  # pyright: ignore[reportArgumentType]
@@ -595,7 +695,14 @@ def calculate_f_score(symbol: str, fund_data: dict = None) -> int:  # pyright: i
                 score += 1
 
         # 3. ROA increase YoY
-        # (simplified - skip for speed)
+        if ni_col and ta_col:
+            ni_prev = get_val(income, prev_row, ni_col) if prev_row else None
+            ta_prev = get_val(balance, prev_row, ta_col) if prev_row else None
+            if ni and ta and ni_prev and ta_prev and float(ta) != 0 and float(ta_prev) != 0:
+                roa_current = float(ni) / float(ta)
+                roa_prev = float(ni_prev) / float(ta_prev)
+                if roa_current > roa_prev:
+                    score += 1
 
         # 4. CFO > Net Income
         if ocf_col and ni_col:
@@ -676,8 +783,8 @@ def compute_core_logic(
     market_rsi: float = 50.0,
     market_group: str = "UNKNOWN",
     df: pd.DataFrame = None,
-    quarterly_data: Dict[str, Dict] = None,
-    date_str: str = None
+    quarterly_data: Optional[Dict[str, Dict[str, Any]]] = None,
+    date_str: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     PURE FUNCTION - Engine tính toán trung tâm
@@ -722,12 +829,6 @@ def compute_core_logic(
     # Target = Entry + 5%
     target_5pct = round(entry * 1.05, 2)
     
-    # Real R:R = Reward / Risk
-    if hard_risk > 0:
-        real_rr_ratio = round(5 / hard_risk_pct, 2)
-    else:
-        real_rr_ratio = 2.0
-    
     # ========== TRADING LEVELS ==========
     atr_value = tech.get("atr", 0) if tech.get("atr", 0) > 0 else entry * 0.02
     min_distance_pct = 0.03
@@ -744,9 +845,14 @@ def compute_core_logic(
     take_profit = round(entry + (atr_value * 3), 2)
     
     # Use real R:R ratio
-    risk = hard_risk
-    reward = target_5pct - entry
-    rr_ratio = real_rr_ratio
+    risk = entry - stop_loss
+    
+    # Anti-infinity: Nếu risk <= 0 (Stop Loss >= Entry), gán RR = 0
+    # Tránh chia cho 0 hoặc kết quả vô cực như trường hợp VIB
+    if risk > 0:
+        rr_ratio = round((take_profit - entry) / risk, 2)
+    else:
+        rr_ratio = 0
     
     # ========== TARGET YIELD & EST. DAYS ==========
     target_yield_pct = round((take_profit - entry) / entry * 100, 2) if entry > 0 else 0
@@ -860,83 +966,91 @@ def compute_core_logic(
     
     criteria_met = len(criteria)
     
-    # ========== VETO CHECK (12 BƯỚC) ==========
+    # ========== VETO CHECK (10 RULES - STRICT) ==========
     is_vetoed = False
     veto_reason = ""
+    veto_count = 0
     has_high_resistance = False
     
-    # Veto 1: ROE < 15% HOẶC F-Score < 6/9
-    if roe_val is not None and roe_val < 15:
+    # Veto 1: CMF < 0 (spec)
+    if cmf_val < 0:
+        is_vetoed = True
+        veto_reason = f"CMF < 0 ({cmf_val:.2f})"
+        veto_count += 1
+    
+    # Veto 2: ROE < 15% (spec)
+    elif roe_val is not None and roe_val < 15:
         is_vetoed = True
         veto_reason = f"ROE < 15% ({roe_val:.1f}%)"
-    elif f_score_val < 6:
+        veto_count += 1
+    
+    # Veto 3: F-Score < 5/9 (spec)
+    elif f_score_val < 5:
         is_vetoed = True
-        veto_reason = f"F-Score < 6 ({f_score_val}/9)"
+        veto_reason = f"F-Score < 5 ({f_score_val}/9)"
+        veto_count += 1
     
-    # Veto 2: Không thuộc VN30 hoặc MIDCAP
-    elif market_group not in ['VN30', 'MIDCAP']:
+    # Veto 4: Market RSI > 80 (spec)
+    elif market_rsi > 80:
         is_vetoed = True
-        veto_reason = f"Không thuộc VN30/MIDCAP ({market_group})"
+        veto_reason = f"Market RSI > 80 ({market_rsi:.1f})"
+        veto_count += 1
     
-    # Veto 2b: P/E của mã > P/E trung bình ngành
-    elif fund_data.get('pe') and fund_data.get('pe_industry_avg'):
-        if fund_data['pe'] > fund_data['pe_industry_avg'] * 1.2:
-            is_vetoed = True
-            veto_reason = f"P/E cao hơn ngành ({fund_data['pe']:.1f} vs {fund_data['pe_industry_avg']:.1f})"
-    
-    # Veto 3: Thanh khoản trung bình 20 phiên < 50 tỷ
-    elif volume_ratio_val > 0 and price_val > 0 and df is not None:
-        avg_vol_value = price_val * df['volume'].tail(20).mean() / 1e9 if 'volume' in df.columns else 0
-        if avg_vol_value < 50:
-            is_vetoed = True
-            veto_reason = f"Thanh khoản < 50B ({avg_vol_value:.0f}B)"
-    
-    # Veto 4: CMF Negative
-    if not is_vetoed and cmf_val < 0:
+    # Veto 5: Ichimoku Bearish (spec) - Check TK-KJ Bearish
+    elif ichimoku_status_val == "bearish":
         is_vetoed = True
-        veto_reason = f"CMF Negative ({cmf_val:.2f})"
+        veto_reason = "Ichimoku Bearish"
+        veto_count += 1
     
-    # Veto 5: ATR = 0
+    # Veto 6: TK-KJ Bearish (Tenkan < Kijun) (spec)
+    elif tech.get("ichimoku_tenkan", 0) < tech.get("ichimoku_kijun", 0) and tech.get("ichimoku_tenkan", 0) > 0:
+        is_vetoed = True
+        veto_reason = "TK < KJ (Bearish)"
+        veto_count += 1
+    
+    # Veto 7: R:R < 1.0 (spec)
+    elif rr_ratio < 1.0:
+        is_vetoed = True
+        veto_reason = f"R:R < 1.0 ({rr_ratio:.2f})"
+        veto_count += 1
+    
+    # Veto 8: Inverted SL (Entry <= Stop Loss) (spec)
+    elif has_inverted_sl:
+        is_vetoed = True
+        veto_reason = "Inverted SL (Entry <= SL)"
+        veto_count += 1
+    
+    # Veto 9: ATR = 0 (spec)
     elif atr_value <= 0:
         is_vetoed = True
         veto_reason = "ATR = 0"
+        veto_count += 1
     
-    # Veto 6: Invalid Price
-    elif entry <= 0:
+    # Veto 10: Missing Financial Data (spec) - NO FALLBACK DATA
+    elif roe_val is None or fund_data.get('pe') is None or fund_data.get('pb') is None:
         is_vetoed = True
-        veto_reason = "Invalid Price"
+        veto_reason = "Missing Financial Data"
+        veto_count += 1
     
-    # Veto 7: Price < SMA50
-    elif sma_50_val > 0 and price_val < sma_50_val:
-        is_vetoed = True
-        veto_reason = "Below SMA50"
+    # Veto 11: Profit Growth âm (Rule 13 - Profit Growth Strategy)
+    # profit_growth được lấy từ fund_data (đã có sẵn trong dict)
+    profit_growth_for_veto = fund_data.get('profit_growth')
+    is_new_listing = fund_data.get('is_new_listing', False)
     
-    # Veto 8: Vùng giá không an toàn - Giá cách SMA200 > 15%
-    elif sma_200_val > 0 and price_val > 0:
-        dist_to_sma200 = ((price_val - sma_200_val) / sma_200_val) * 100
-        if dist_to_sma200 > 15:
+    if profit_growth_for_veto is not None and profit_growth_for_veto < 0:
+        # NEW_LISTING: Không VETO trừ khi lợi nhuận thực tế âm
+        if is_new_listing:
+            # Cổ phiếu mới: chỉ VETO nếu profit_growth == 0.001 (placeholder) hay thực sự âm?
+            # 0.001 là giá trị placeholder, không nên coi là âm
+            if profit_growth_for_veto < 0 and profit_growth_for_veto != 0.001:
+                is_vetoed = True
+                veto_reason = f"Lợi nhuận tăng trưởng âm ({profit_growth_for_veto:.1f}%)"
+                veto_count += 1
+        else:
+            # Cổ phiếu thường: VETO nếu tăng trưởng âm
             is_vetoed = True
-            veto_reason = f"Cách SMA200 > 15% ({dist_to_sma200:.1f}%)"
-    
-    # Veto 9: Target Yield < 2%
-    elif target_yield_pct < 2:
-        is_vetoed = True
-        veto_reason = f"Target < 2% ({target_yield_pct:.1f}%)"
-    
-    # Veto 10: R:R < 1.5
-    if not is_vetoed and rr_ratio < 1.5:
-        is_vetoed = True
-        veto_reason = f"R:R < 1.5 ({rr_ratio:.2f})"
-    
-    # Veto 11: Unrealistic Target
-    elif target_yield_pct > 10 and est_days < 5:
-        is_vetoed = True
-        veto_reason = f"Unrealistic Target ({target_yield_pct:.1f}% in {est_days:.0f}d)"
-    
-    # Veto 12: Mã yếu hơn ngành
-    elif fund_data.get('is_industry_leader') == False and fund_data.get('industry_performance', 0) < -3:
-        is_vetoed = True
-        veto_reason = f"Yếu hơn ngành ({fund_data.get('industry_performance', 0):.1f}%)"
+            veto_reason = f"Lợi nhuận tăng trưởng âm ({profit_growth_for_veto:.1f}%)"
+            veto_count += 1
     
     # Safe Entry
     safe_entry_distance = 0
@@ -1028,6 +1142,17 @@ def compute_core_logic(
         elif roe_val < 5:
             fund_score = max(0, fund_score - 15)
     
+    # ========== PROFIT GROWTH STRATEGY ==========
+    profit_growth = fund_data.get('profit_growth')
+    if profit_growth is not None:
+        if profit_growth > 25:
+            fund_score = min(100, fund_score + 20)  # Tăng trưởng > 25% -> +20 điểm
+        elif profit_growth > 15:
+            fund_score = min(100, fund_score + 12)
+        elif profit_growth > 5:
+            fund_score = min(100, fund_score + 8)
+        # NOTE: VETO cho profit_growth < 0 đã được xử lý ở trên (Veto 11)
+    
     # SMART MONEY & INDUSTRY BONUS
     foreign_streak = fund_data.get('foreign_buy_streak', 0)
     foreign_bonus = 0
@@ -1072,8 +1197,11 @@ def compute_core_logic(
     # ========== SIGNAL ==========
     is_sell_zone = market_rsi > 70
     
+    # If VETO, always signal WAIT (already set, but ensure)
     if is_vetoed:
         signal = "WAIT"
+        tech_score = max(25, tech_score - 30) if tech_score > 25 else 25
+        is_fast_pick = False
     elif criteria_met >= 9:
         if is_sell_zone:
             signal = "STRONG_BUY" if (adx_val > 25 and volume_ratio_val > 1.0) else "WATCH"
@@ -1096,11 +1224,20 @@ def compute_core_logic(
         market_weight = -20
     elif market_rsi > 70:
         market_weight = -10
+    elif market_rsi < 25:
+        market_weight = 20  # x1.2 boost when Market RSI < 25
     elif market_rsi < 40:
         market_weight = +10
     
-    base_master_score = int(fund_score * 0.6 + tech_score * 0.4)
-    master_score = max(0, min(100, base_master_score + market_weight))
+    # Master Score = 70% Technical + 30% Fundamental (per spec v10)
+    base_master_score = int(tech_score * 0.7 + fund_score * 0.3)
+    
+    # VETO: Set master_score = 10 (strict per spec)
+    if is_vetoed:
+        master_score = 10
+        base_master_score = 10
+    else:
+        master_score = max(0, min(100, base_master_score + market_weight))
     
     # ========== TREND ==========
     if sma_20_val > 0 and sma_50_val > 0:
@@ -1128,11 +1265,44 @@ def compute_core_logic(
     sma10_val = tech.get('sma_10', price_val)
     sma20_val_t = tech.get('sma_20', price_val)
     
-    # FV Daily: (vwap * 0.6) + (sma10 * 0.4)
-    fv_daily = round((vwap_val * 0.6) + (sma10_val * 0.4), 2)
+    # FV Daily: (VWAP * 0.4) + (SMA20 * 0.6) - giảm nhiễu ngắn hạn
+    fv_daily = round((vwap_val * 0.4) + (sma20_val_t * 0.6), 2)
     
-    # FV Weekly: (vwap * 0.6) + (sma20 * 0.4)
-    fv_weekly = round((vwap_val * 0.6) + (sma20_val_t * 0.4), 2)
+    # FV Weekly: Intrinsic-based formula (per spec v10)
+    # Priority: pe_industry_avg from API > INDUSTRY_CONFIG target
+    pe_industry_avg = fund_data.get('pe_industry_avg', 0) or 0
+    industry_target_pe = config.get('target', 11.0)
+    
+    # Use API value if available, else fallback to config
+    actual_pe = fund_data.get('pe') or 0
+    
+    # Calculate Intrinsic Value
+    if pe_industry_avg > 0:
+        # Use API-provided industry average
+        intrinsic = price_val * (pe_industry_avg / actual_pe) if actual_pe > 0 else price_val
+    elif industry_target_pe > 0:
+        # Fallback to INDUSTRY_CONFIG
+        intrinsic = price_val * (industry_target_pe / actual_pe) if actual_pe > 0 else price_val
+    else:
+        intrinsic = price_val
+    
+    # FV_Weekly = (Intrinsic * FundScore + TakeProfit * TechScore) / (FundScore + TechScore)
+    if fund_score + tech_score > 0:
+        fv_weekly = (intrinsic * fund_score + take_profit * tech_score) / (fund_score + tech_score)
+    else:
+        fv_weekly = fv_daily
+    
+    fv_weekly = round(fv_weekly, 2)
+    
+    # Market Risk Adjustment: -10% when Market RSI > 75
+    if market_rsi > 75:
+        fv_weekly = round(fv_weekly * 0.9, 2)
+    
+    # Valuation Status - Nếu bị VETO thì hiển thị RISK
+    if is_vetoed:
+        valuation_status = "RISK"
+    else:
+        valuation_status = "Rẻ" if price_val < fv_weekly else "Đắt"
     
     # ========== RETURN ==========
     return {
@@ -1177,6 +1347,8 @@ def compute_core_logic(
         # Fair Value
         "fv_daily": fv_daily,
         "fv_weekly": fv_weekly,
+        "valuation_status": valuation_status,
+        "intrinsic_value": round(intrinsic, 2),
         "industry_config": config,
         # Target Yield & Est. Days
         "target_yield_pct": target_yield_pct,
@@ -1223,6 +1395,8 @@ def compute_core_logic(
         "f_score": f_score_val,
         "f_score_grade": get_f_score_grade(f_score_val),
         "profit_growth": fund_data.get('profit_growth'),
+        "profit_growth_note": fund_data.get('profit_growth_note', 'N/A'),
+        "is_new_listing": fund_data.get('is_new_listing', False),
         # Smart Money & Industry
         "foreign_buy_streak": foreign_streak,
         "foreign_bonus": foreign_bonus,
@@ -1961,6 +2135,11 @@ def save_results_to_db(results: List[Dict[str, Any]]) -> int:
                     "target_yield_pct": data.get("target_yield_pct", 0),
                     "criteria_met": data["criteria_met"],
                     "criteria_list": data["criteria_list"],
+                    # Fair Value (v10)
+                    "fv_daily": data.get("fv_daily", 0),
+                    "fv_weekly": data.get("fv_weekly", 0),
+                    "valuation_status": data.get("valuation_status", "N/A"),
+                    "intrinsic_value": data.get("intrinsic_value", 0),
                     "trend": data["trend"],
                     "breakout_status": data["breakout_status"],
                     "market_rsi": data["market_rsi"],
