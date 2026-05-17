@@ -11,14 +11,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from time import sleep
 from typing import List, Optional, Dict, Any
-import pandas as pd  # pyright: ignore[reportMissingImports]  # pyright: ignore[reportMissingImports]
+import pandas as pd
 
-from django.utils import timezone  # pyright: ignore[reportMissingImports]
-from dashboard.models import StockData, StockAnalysis, SyncStatus, VN30_SYMBOLS
+from django.utils import timezone
+from dashboard.models import StockData, StockAnalysis, SyncStatus, IndustryValuation, VN30_SYMBOLS
 
 
-# ============== INDUSTRY CONFIG (SHARED) ==============
-# Dùng chung cho cả Live scan và Backtest
+# ============== INDUSTRY CONFIG (SHARED - Fallback) ==============
+# Dùng chung cho cả Live scan và Backtest (chỉ là fallback khi không có Dynamic data)
 INDUSTRY_CONFIG = {
     'Banking': {'type': 'PB', 'target': 1.65},
     'Real Estate': {'type': 'PB', 'target': 1.8},
@@ -28,14 +28,249 @@ INDUSTRY_CONFIG = {
     'FMCG': {'type': 'PE', 'target': 14.0},
     'Oil & Gas': {'type': 'PE', 'target': 9.0},
     'Steel': {'type': 'PE', 'target': 8.5},
+    'Rubber': {'type': 'PE', 'target': 10.0},
+    'Conglomerate': {'type': 'PE', 'target': 10.0},
     'Default': {'type': 'PE', 'target': 11.0}
 }
+
+# Wealth Guard Cap multiplier
+WEALTH_GUARD_CAP = 1.25  # Không cho phép P/E vượt quá 25% so với ngưỡng tĩnh
+
+
+# ============== DYNAMIC SECTOR VALUATION ==============
+
+def sync_sector_benchmarks() -> Dict[str, Any]:
+    """
+    Đồng bộ P/E và P/B Median theo ngành từ Screener API.
+    Sử dụng Median thay vì Mean để loại bỏ outliers.
+    
+    Returns:
+        Dict với thông tin sync sector
+    """
+    from dashboard.models import IndustryValuation
+    import traceback
+    
+    result = {
+        "success": False,
+        "sectors_synced": 0,
+        "errors": [],
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    try:
+        print("[Sector Sync] Bắt đầu sync sector benchmarks...")
+        
+        # Import vnstock_data
+        try:
+            from vnstock_data import Insights
+            ins = Insights()
+        except ImportError:
+            result["errors"].append("vnstock_data not installed")
+            print("[Sector Sync] ❌ vnstock_data not installed")
+            return result
+        
+        # Lấy dữ liệu screener
+        try:
+            print("[Sector Sync] Đang lấy dữ liệu screener...")
+            df_screener = ins.screener().filter()
+            
+            if df_screener is None or len(df_screener) == 0:
+                result["errors"].append("Empty screener data")
+                return result
+                
+        except Exception as e:
+            result["errors"].append(f"Screener API error: {str(e)}")
+            print(f"[Sector Sync] ❌ Screener API error: {e}")
+            return result
+        
+        # Chuẩn hóa columns (screener có: pe, pb, market_cap, vi_sector hoặc industry_en)
+        df = df_screener.copy()
+        
+        # Rename columns nếu cần
+        if 'pe' in df.columns:
+            df = df.rename(columns={'pe': 'ttm_pe'})
+        if 'pb' in df.columns:
+            df = df.rename(columns={'pb': 'ttm_pb'})
+        
+        # Kiểm tra columns
+        print(f"[Sector Sync] Columns: {df.columns.tolist()[:10]}...")
+        
+        # Filter: chỉ lấy mã có vốn hóa > 100 tỷ
+        df = df[df['market_cap'].notna() & (df['market_cap'] > 100)]
+        
+        # Filter P/E hợp lệ (> 0 và < 1000 để loại outliers)
+        df_valid_pe = df[df['ttm_pe'].notna() & (df['ttm_pe'] > 0) & (df['ttm_pe'] < 1000)]
+        
+        # Filter P/B hợp lệ (> 0 và < 50 để loại outliers)
+        df_valid_pb = df[df['ttm_pb'].notna() & (df['ttm_pb'] > 0) & (df['ttm_pb'] < 50)]
+        
+        print(f"[Sector Sync] Tổng cổ phiếu: {len(df)}, Hợp lệ: {len(df_valid_pe)}")
+        
+        # Xác định column ngành (ưu tiên vi_sector, fallback sang industry_en)
+        sector_col = 'vi_sector' if 'vi_sector' in df.columns else 'industry_en'
+        
+        if sector_col not in df.columns:
+            result["errors"].append(f"No sector column found. Available: {df.columns.tolist()}")
+            return result
+        
+        # Nhóm theo sector và tính Median bằng pandas (vectorized)
+        sector_stats = df_valid_pe.groupby(sector_col).agg(
+            median_pe=('ttm_pe', 'median'),
+            stock_count_pe=('symbol', 'count'),
+            market_cap_avg=('market_cap', 'mean')
+        ).reset_index()
+        
+        # Tính median P/B theo sector
+        sector_pb_stats = df_valid_pb.groupby(sector_col).agg(
+            median_pb=('ttm_pb', 'median'),
+            stock_count_pb=('symbol', 'count')
+        ).reset_index()
+        
+        # Merge P/E và P/B
+        sector_stats = sector_stats.merge(sector_pb_stats, on=sector_col, how='outer')
+        
+        # Lấy stock_count = min của PE và PB count
+        sector_stats['stock_count'] = sector_stats[['stock_count_pe', 'stock_count_pb']].min(axis=1)
+        
+        # Rename sector column
+        sector_stats = sector_stats.rename(columns={sector_col: 'sector_name'})
+        
+        # Fill NaN values
+        sector_stats = sector_stats.fillna(0)
+        
+        # Map sector name sang industry name
+        SECTOR_NAME_MAP = {
+            'Ngân hàng': 'Banking',
+            'Bảo hiểm': 'Insurance',
+            'Chứng khoán': 'Securities',
+            'Bất động sản': 'Real Estate',
+            'Công nghệ': 'Technology',
+            'Bán lẻ': 'Retail',
+            'Tiêu dùng': 'FMCG',
+            'Dầu khí': 'Oil & Gas',
+            'Điện': 'Power & Energy',
+            'Xây dựng': 'Construction',
+            'Công nghiệp': 'Industrial',
+            'Vận tải': 'Transportation',
+            'Y tế': 'Healthcare',
+            'Viễn thông': 'Telecommunications',
+            'Tiện ích': 'Utilities',
+            'Truyền thông': 'Media',
+            'Du lịch': 'Travel',
+            'Thép': 'Steel',
+            'Hóa chất': 'Chemicals',
+            'Nông nghiệp': 'Agriculture',
+            'Cao su': 'Rubber',
+            'Ô tô': 'Automobiles',
+            'Tập đoàn': 'Conglomerate',
+            'Tài nguyên': 'Basic Resources',
+            'Thực phẩm': 'Food',
+        }
+        
+        # Sync vào database
+        synced_count = 0
+        for _, row in sector_stats.iterrows():
+            sector_name = str(row['sector_name']) if pd.notna(row['sector_name']) else 'Unknown'
+            industry_name = SECTOR_NAME_MAP.get(sector_name, sector_name)
+            
+            # Skip nếu stock_count < 3 (không đủ mẫu)
+            if row['stock_count'] < 3:
+                continue
+            
+            obj, created = IndustryValuation.objects.update_or_create(
+                name=industry_name,
+                defaults={
+                    'sector_code': sector_name,
+                    'median_pe': round(row['median_pe'], 2),
+                    'median_pb': round(row['median_pb'], 2),
+                    'stock_count': int(row['stock_count']),
+                    'market_cap_avg': round(row['market_cap_avg'], 2),
+                    'is_active': True
+                }
+            )
+            synced_count += 1
+        
+        result["success"] = True
+        result["sectors_synced"] = synced_count
+        print(f"[Sector Sync] ✅ Đã sync {synced_count} sectors thành công!")
+        
+        # Print sample
+        for _, row in sector_stats.head(5).iterrows():
+            print(f"  - {row['sector_name']}: PE={row['median_pe']:.1f}, PB={row['median_pb']:.1f}, Count={row['stock_count']}")
+        
+    except Exception as e:
+        result["errors"].append(str(e))
+        print(f"[Sector Sync] ❌ Lỗi: {e}")
+        traceback.print_exc()
+    
+    return result
+
+
+def get_target_valuation(industry_name: str) -> Dict:
+    """
+    Lấy P/E và P/B target cho một ngành.
+    
+    Priority:
+    1. Dynamic Median từ IndustryValuation (database)
+    2. Fallback sang INDUSTRY_CONFIG (static)
+    3. Wealth Guard Cap: Final = min(Dynamic, Static * 1.25)
+    
+    Returns:
+        Dict với 'type' (PE/PB), 'target' (float), 'source' (dynamic/static)
+    """
+    # Tìm industry trong database
+    try:
+        iv = IndustryValuation.objects.filter(name=industry_name, is_active=True).first()
+        
+        if iv and iv.median_pe > 0:
+            # Lấy static config để apply cap
+            static_config = INDUSTRY_CONFIG.get(industry_name, INDUSTRY_CONFIG['Default'])
+            
+            # Determine valuation type
+            val_type = static_config.get('type', 'PE')
+            static_target = static_config.get('target', 11.0)
+            
+            if val_type == 'PB':
+                # P/B: Apply Wealth Guard Cap
+                final_target = min(iv.median_pb, static_target * WEALTH_GUARD_CAP)
+                return {
+                    'type': 'PB',
+                    'target': round(final_target, 2),
+                    'dynamic': round(iv.median_pb, 2),
+                    'static': static_target,
+                    'source': 'dynamic',
+                    'cap_applied': final_target != iv.median_pb
+                }
+            else:
+                # P/E: Apply Wealth Guard Cap
+                final_target = min(iv.median_pe, static_target * WEALTH_GUARD_CAP)
+                return {
+                    'type': 'PE',
+                    'target': round(final_target, 2),
+                    'dynamic': round(iv.median_pe, 2),
+                    'static': static_target,
+                    'source': 'dynamic',
+                    'cap_applied': final_target != iv.median_pe
+                }
+    except Exception:
+        pass
+    
+    # Fallback: Sử dụng INDUSTRY_CONFIG
+    static_config = INDUSTRY_CONFIG.get(industry_name, INDUSTRY_CONFIG['Default'])
+    return {
+        'type': static_config.get('type', 'PE'),
+        'target': static_config.get('target', 11.0),
+        'dynamic': 0.0,
+        'static': static_config.get('target', 11.0),
+        'source': 'static',
+        'cap_applied': False
+    }
 
 
 # ============== CONSTANTS ==============
 MAX_WORKERS = 8
 UNIVERSE_SIZE = 100
-MIN_LIQUIDITY_BILLION = 15
+MIN_LIQUIDITY_BILLION = 10  # Giảm từ 15 xuống 10 tỷ để đảm bảo đủ mã
 MIN_PRICE = 10000
 
 
@@ -43,7 +278,7 @@ def get_market_rsi() -> float:
     """Lấy RSI của VNIndex"""
     try:
         from vnstock import Quote
-        q = Quote(symbol="VNINDEX")
+        q = Quote(symbol="VNINDEX", source="kbs")
         df = q.history(
             start=(datetime.now() - pd.Timedelta(days=60)).strftime("%Y-%m-%d"),
             end=datetime.now().strftime("%Y-%m-%d"),
@@ -110,7 +345,7 @@ def get_fundamental_data(symbol: str, fast_mode: bool = False) -> Dict[str, Any]
 
     # Try vnstock_data first (Silver+)
     try:
-        from vnstock_data import Fundamental  # pyright: ignore[reportMissingImports]  # pyright: ignore[reportMissingImports]
+        from vnstock_data import Fundamental
         import warnings as w
         w.filterwarnings('ignore')
 
@@ -259,10 +494,13 @@ def get_fundamental_data(symbol: str, fast_mode: bool = False) -> Dict[str, Any]
 def get_industry_pe_average(symbol: str) -> Optional[float]:
     """
     Lấy P/E trung bình ngành của mã cổ phiếu
-    Sử dụng vnstock_data Market để lấy P/E thị trường hoặc tính trung bình ngành
+    
+    Priority:
+    1. Từ bảng IndustryValuation (đã được lọc P/E > 0)
+    2. Fallback: P/E thị trường VNINDEX
     """
     try:
-        # Lấy thông tin ngành của mã
+        # Lấy thông tin ngành của mã từ StockData
         from .models import StockData
         try:
             stock = StockData.objects.get(symbol=symbol.upper())
@@ -270,68 +508,40 @@ def get_industry_pe_average(symbol: str) -> Optional[float]:
         except:
             industry = None
         
-        if not industry:
-            # Fallback: lấy P/E thị trường VNINDEX
-            try:
-                from vnstock_data import Market  # pyright: ignore[reportMissingImports]  # pyright: ignore[reportMissingImports]
-                mkt = Market()
-                pe_data = mkt.pe(duration="1Y")
-                if pe_data is not None and len(pe_data) > 0:
-                    return round(float(pe_data['pe'].iloc[-1]), 2)
-            except:
-                pass
-            return None
-        
-        # Tính P/E trung bình của ngành từ top gainers
-        # (Đây là ước lượng vì API không có direct industry PE)
-        try:
-            from vnstock_data import TopStock  # pyright: ignore[reportMissingImports]  # pyright: ignore[reportMissingImports]
-            insights = TopStock()
-            gainers = insights.gainer(limit=20)
+        # Normalize industry name
+        if industry:
+            industry_key = next((k for k in INDUSTRY_CONFIG if k.lower() in industry.lower()), None)
             
-            if gainers is not None and len(gainers) > 0:
-                # Lấy P/E của các mã top - sử dụng Fundamential
-                from vnstock_data import Fundamental  # pyright: ignore[reportMissingImports]
-                fun = Fundamental()
-                
-                pe_sum = 0
-                pe_count = 0
-                
-                for idx, row in gainers.head(10).iterrows():
-                    sym = row.get('symbol')
-                    if sym:
-                        try:
-                            ratios = fun.equity(sym).ratio(period="year")
-                            if ratios is not None and len(ratios) > 0:
-                                for col in ['pe', 'PE', 'P/E']:
-                                    if col in ratios.columns:
-                                        pe_val = float(ratios[col].iloc[0])
-                                        if 0 < pe_val < 100:
-                                            pe_sum += pe_val
-                                            pe_count += 1
-                                            break
-                        except:
-                            continue
-                
-                if pe_count > 0:
-                    return round(pe_sum / pe_count, 2)
-        except:
-            pass
+            if industry_key:
+                # Lấy từ IndustryValuation (đã filtered P/E > 0)
+                try:
+                    iv = IndustryValuation.objects.filter(name=industry_key, is_active=True).first()
+                    if iv and iv.median_pe > 0:
+                        return round(iv.median_pe, 2)
+                except:
+                    pass
         
-        # Fallback cuối: P/E thị trường
+        # Fallback: P/E thị trường VNINDEX
         try:
-            from vnstock_data import Market  # pyright: ignore[reportMissingImports]  # pyright: ignore[reportMissingImports]
+            from vnstock_data import Market
             mkt = Market()
             pe_data = mkt.pe(duration="1Y")
             if pe_data is not None and len(pe_data) > 0:
-                return round(float(pe_data['pe'].iloc[-1]), 2)
+                for col in pe_data.columns:
+                    if 'pe' in col.lower():
+                        return round(float(pe_data[col].iloc[-1]), 2)
         except:
             pass
-            
-    except Exception as e:
-        pass
-    
-    return None
+        
+        # Final fallback: sử dụng INDUSTRY_CONFIG
+        if industry:
+            industry_key = next((k for k in INDUSTRY_CONFIG if k.lower() in industry.lower()), 'Default')
+            return INDUSTRY_CONFIG.get(industry_key, INDUSTRY_CONFIG['Default']).get('target')
+        
+        return INDUSTRY_CONFIG['Default']['target']
+        
+    except Exception:
+        return None
 
 
 def calculate_optimal_position(
@@ -380,7 +590,7 @@ def get_foreign_buy_streak(symbol: str, lookback: int = 5) -> int:
     Returns: Số phiên mua ròng liên tiếp (0 = không có)
     """
     try:
-        from vnstock_data import TopStock  # pyright: ignore[reportMissingImports]
+        from vnstock_data import TopStock
         insights = TopStock()
         
         # Lấy dữ liệu foreign buy gần đây
@@ -446,7 +656,7 @@ def get_industry_performance(symbol: str, df: pd.DataFrame, lookback: int = 5) -
         
         # Lấy danh sách cổ phiếu cùng ngành từ vnstock
         try:
-            from vnstock_data import Listing  # pyright: ignore[reportMissingImports]
+            from vnstock_data import Listing
             lst = Listing(source="kbs")
             
             # Lấy industry của mã (từ stock data)
@@ -502,7 +712,6 @@ def calculate_profit_growth(symbol: str) -> dict:
     
     try:
         from vnstock_data import Fundamental
-        import pandas as pd
         import warnings as w
         w.filterwarnings('ignore')
 
@@ -646,7 +855,7 @@ def calculate_f_score(symbol: str, fund_data: dict = None) -> int:  # pyright: i
     score = 0
 
     try:
-        from vnstock_data import Fundamental  # pyright: ignore[reportMissingImports]
+        from vnstock_data import Fundamental
         import warnings as w
         w.filterwarnings('ignore')
 
@@ -772,6 +981,531 @@ def get_f_score_grade(score: int) -> str:
         return "F"
 
 
+# ============== SECTOR-SPECIFIC SCORING FUNCTIONS (V3) ==============
+
+def get_sector_category(industry: str) -> str:
+    """
+    Classify industry into sector category for scoring purposes.
+    Returns: 'banking', 'real_estate', 'manufacturing', 'retail', 'general'
+    """
+    if not industry:
+        return 'general'
+    
+    industry_lower = industry.lower()
+    
+    # Banking & Financial
+    if any(k in industry_lower for k in ['bank', 'ngân hàng', 'chứng khoán', 'bảo hiểm', 'tín dụng', 'tài chính']):
+        return 'banking'
+    
+    # Real Estate
+    if any(k in industry_lower for k in ['bất động sản', 'real estate', 'xây dựng', 'construction']):
+        return 'real_estate'
+    
+    # Manufacturing (Capital Intensive)
+    if any(k in industry_lower for k in ['thép', 'steel', 'điện', 'power', 'năng lượng', 'dầu', 'oil', 'gas', 'hóa', 'chem', 'xi măng', 'cement', 'phân bón', 'fertilizer']):
+        return 'manufacturing'
+    
+    # Retail & Consumer
+    if any(k in industry_lower for k in ['bán lẻ', 'retail', 'fmcg', 'tiêu dùng', 'consumer', 'thực phẩm', 'food', 'đồ uống', 'beverage', 'dược', 'pharma']):
+        return 'retail'
+    
+    return 'general'
+
+
+def score_banking_sector(raw_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Score banking sector stocks using P/B, NIM, NPL, CASA metrics.
+    Banking uses P/B instead of P/E for valuation.
+    """
+    result = {
+        'fund_score': 0,
+        'primary_metric': 'P/B',
+        'primary_value': raw_data.get('pb'),
+        'sector_metrics': {}
+    }
+    
+    pb = raw_data.get('pb')
+    roe = raw_data.get('roe')
+    pe = raw_data.get('pe')
+    
+    # P/B scoring (Primary for banks)
+    # Good P/B for banks: < 1.5, Great: < 1.0
+    if pb:
+        if pb < 0.8:
+            result['fund_score'] += 25
+        elif pb < 1.0:
+            result['fund_score'] += 22
+        elif pb < 1.5:
+            result['fund_score'] += 18
+        elif pb < 2.0:
+            result['fund_score'] += 12
+        else:
+            result['fund_score'] += 5
+    
+    # ROE scoring (banks typically have 15-25% ROE)
+    if roe:
+        if roe >= 20:
+            result['fund_score'] += 25
+        elif roe >= 15:
+            result['fund_score'] += 20
+        elif roe >= 10:
+            result['fund_score'] += 12
+        elif roe >= 5:
+            result['fund_score'] += 6
+        else:
+            result['fund_score'] += 0
+    
+    # NIM (Net Interest Margin) - if available
+    nim = raw_data.get('nim') or raw_data.get('net_interest_margin')
+    if nim:
+        result['sector_metrics']['nim'] = nim
+        if nim >= 4:
+            result['fund_score'] += 15
+        elif nim >= 3:
+            result['fund_score'] += 10
+        elif nim >= 2:
+            result['fund_score'] += 5
+    
+    # NPL (Non-Performing Loans) - if available
+    npl = raw_data.get('npl') or raw_data.get('npl_ratio')
+    if npl:
+        result['sector_metrics']['npl'] = npl
+        if npl <= 2:
+            result['fund_score'] += 20
+        elif npl <= 3:
+            result['fund_score'] += 12
+        elif npl <= 5:
+            result['fund_score'] += 5
+        else:
+            result['fund_score'] -= 10  # Penalty
+    
+    # CASA ratio - if available
+    casa = raw_data.get('casa') or raw_data.get('casa_ratio')
+    if casa:
+        result['sector_metrics']['casa'] = casa
+        if casa >= 30:
+            result['fund_score'] += 10
+        elif casa >= 20:
+            result['fund_score'] += 5
+    
+    # Capital adequacy (CAR) - if available
+    car = raw_data.get('car') or raw_data.get('capital_adequacy_ratio')
+    if car:
+        result['sector_metrics']['car'] = car
+        if car >= 13:
+            result['fund_score'] += 5
+    
+    # Cap at 100
+    result['fund_score'] = min(result['fund_score'], 100)
+    
+    return result
+
+
+def score_real_estate_sector(raw_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Score real estate sector stocks using D/E, Inventory status, and land bank.
+    """
+    result = {
+        'fund_score': 0,
+        'primary_metric': 'D/E',
+        'primary_value': raw_data.get('debt_equity') or raw_data.get('de'),
+        'sector_metrics': {}
+    }
+    
+    de = raw_data.get('debt_equity') or raw_data.get('de') or 0
+    roe = raw_data.get('roe')
+    pb = raw_data.get('pb')
+    
+    # D/E scoring (Critical for RE)
+    # Good D/E for RE: < 1.0, Caution: 1.0-1.5, High: > 1.5
+    if de:
+        if de < 0.5:
+            result['fund_score'] += 25
+        elif de < 1.0:
+            result['fund_score'] += 20
+        elif de < 1.5:
+            result['fund_score'] += 12
+        elif de < 2.0:
+            result['fund_score'] += 6
+        else:
+            result['fund_score'] += 0
+    
+    # ROE scoring
+    if roe:
+        if roe >= 15:
+            result['fund_score'] += 25
+        elif roe >= 10:
+            result['fund_score'] += 18
+        elif roe >= 5:
+            result['fund_score'] += 10
+        elif roe >= 0:
+            result['fund_score'] += 5
+    
+    # P/B scoring (RE often trades below book value)
+    if pb:
+        if pb < 0.7:
+            result['fund_score'] += 15
+        elif pb < 1.0:
+            result['fund_score'] += 10
+        elif pb < 1.5:
+            result['fund_score'] += 5
+    
+    # Inventory status - if available
+    inventory_days = raw_data.get('inventory_days') or raw_data.get('inventory_turnover_days')
+    if inventory_days:
+        result['sector_metrics']['inventory_days'] = inventory_days
+        if inventory_days < 365:
+            result['fund_score'] += 15
+        elif inventory_days < 730:
+            result['fund_score'] += 8
+        elif inventory_days < 1095:
+            result['fund_score'] += 3
+    
+    # Land bank (pre-sales potential) - if available
+    land_bank = raw_data.get('land_bank') or raw_data.get('unsold_inventory')
+    if land_bank:
+        result['sector_metrics']['land_bank'] = land_bank
+        result['fund_score'] += 5  # Having land bank is positive
+    
+    # Cap at 100
+    result['fund_score'] = min(result['fund_score'], 100)
+    
+    return result
+
+
+def score_manufacturing_sector(raw_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Score manufacturing sector stocks using Gross Margin, Inventory Turnover.
+    Lower ROE threshold (10%) for capital-intensive sectors.
+    """
+    result = {
+        'fund_score': 0,
+        'primary_metric': 'Gross Margin',
+        'primary_value': raw_data.get('gross_margin'),
+        'sector_metrics': {}
+    }
+    
+    roe = raw_data.get('roe')
+    gross_margin = raw_data.get('gross_margin')
+    inventory_turnover = raw_data.get('inventory_turnover')
+    pb = raw_data.get('pb')
+    
+    # Gross Margin scoring
+    if gross_margin:
+        result['sector_metrics']['gross_margin'] = gross_margin
+        if gross_margin >= 30:
+            result['fund_score'] += 25
+        elif gross_margin >= 20:
+            result['fund_score'] += 18
+        elif gross_margin >= 10:
+            result['fund_score'] += 10
+        else:
+            result['fund_score'] += 3
+    
+    # ROE scoring (lower threshold for capital-intensive)
+    if roe:
+        if roe >= 15:
+            result['fund_score'] += 25
+        elif roe >= 10:  # Lowered from 15%
+            result['fund_score'] += 18
+        elif roe >= 5:
+            result['fund_score'] += 10
+        elif roe >= 0:
+            result['fund_score'] += 3
+    
+    # Inventory Turnover
+    if inventory_turnover:
+        result['sector_metrics']['inventory_turnover'] = inventory_turnover
+        if inventory_turnover >= 6:
+            result['fund_score'] += 20
+        elif inventory_turnover >= 4:
+            result['fund_score'] += 14
+        elif inventory_turnover >= 2:
+            result['fund_score'] += 8
+        else:
+            result['fund_score'] += 3
+    
+    # P/B scoring
+    if pb:
+        if pb < 1.0:
+            result['fund_score'] += 15
+        elif pb < 1.5:
+            result['fund_score'] += 10
+        elif pb < 2.0:
+            result['fund_score'] += 5
+    
+    # Cap at 100
+    result['fund_score'] = min(result['fund_score'], 100)
+    
+    return result
+
+
+def score_retail_sector(raw_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Score retail/consumer sector stocks.
+    Focus on P/E, Revenue Growth, ROE.
+    """
+    result = {
+        'fund_score': 0,
+        'primary_metric': 'P/E',
+        'primary_value': raw_data.get('pe'),
+        'sector_metrics': {}
+    }
+    
+    pe = raw_data.get('pe')
+    roe = raw_data.get('roe')
+    profit_growth = raw_data.get('profit_growth')
+    
+    # P/E scoring (important for growth sectors)
+    if pe:
+        if 5 <= pe <= 15:
+            result['fund_score'] += 28
+        elif 15 < pe <= 20:
+            result['fund_score'] += 20
+        elif 20 < pe <= 25:
+            result['fund_score'] += 12
+        elif pe < 5:
+            result['fund_score'] += 18  # May indicate problems
+        else:
+            result['fund_score'] += 5
+    
+    # ROE scoring (standard threshold for consumer)
+    if roe:
+        if roe >= 20:
+            result['fund_score'] += 25
+        elif roe >= 15:
+            result['fund_score'] += 20
+        elif roe >= 10:
+            result['fund_score'] += 12
+        else:
+            result['fund_score'] += 5
+    
+    # Profit Growth
+    if profit_growth:
+        result['sector_metrics']['profit_growth'] = profit_growth
+        if profit_growth >= 20:
+            result['fund_score'] += 22
+        elif profit_growth >= 10:
+            result['fund_score'] += 16
+        elif profit_growth >= 0:
+            result['fund_score'] += 8
+    
+    # P/B scoring
+    pb = raw_data.get('pb')
+    if pb:
+        if pb < 3:
+            result['fund_score'] += 15
+        elif pb < 5:
+            result['fund_score'] += 10
+        else:
+            result['fund_score'] += 3
+    
+    # Cap at 100
+    result['fund_score'] = min(result['fund_score'], 100)
+    
+    return result
+
+
+def score_general_sector(raw_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Default scoring for sectors without specific rules.
+    Uses P/E, P/B, ROE framework.
+    """
+    result = {
+        'fund_score': 0,
+        'primary_metric': 'P/E',
+        'primary_value': raw_data.get('pe'),
+        'sector_metrics': {}
+    }
+    
+    pe = raw_data.get('pe')
+    pb = raw_data.get('pb')
+    roe = raw_data.get('roe')
+    
+    # P/E scoring
+    if pe:
+        if 5 <= pe <= 20:
+            result['fund_score'] += 30
+        elif 20 < pe <= 30:
+            result['fund_score'] += 20
+        elif pe < 5:
+            result['fund_score'] += 15
+        else:
+            result['fund_score'] += 5
+    
+    # P/B scoring
+    if pb:
+        if pb < 1.5:
+            result['fund_score'] += 25
+        elif pb < 2.5:
+            result['fund_score'] += 18
+        elif pb < 4:
+            result['fund_score'] += 10
+        else:
+            result['fund_score'] += 3
+    
+    # ROE scoring
+    if roe:
+        if roe >= 20:
+            result['fund_score'] += 30
+        elif roe >= 15:
+            result['fund_score'] += 22
+        elif roe >= 10:
+            result['fund_score'] += 14
+        elif roe >= 5:
+            result['fund_score'] += 7
+    
+    # Cap at 100
+    result['fund_score'] = min(result['fund_score'], 100)
+    
+    return result
+
+
+def score_by_sector(raw_data: Dict[str, Any], industry: str = "") -> Dict[str, Any]:
+    """
+    Main entry point for sector-specific scoring.
+    Routes to appropriate scoring function based on industry.
+    """
+    sector = get_sector_category(industry)
+    
+    if sector == 'banking':
+        return score_banking_sector(raw_data)
+    elif sector == 'real_estate':
+        return score_real_estate_sector(raw_data)
+    elif sector == 'manufacturing':
+        return score_manufacturing_sector(raw_data)
+    elif sector == 'retail':
+        return score_retail_sector(raw_data)
+    else:
+        return score_general_sector(raw_data)
+
+
+# ============== HEALTH VETO CHECK (13 RULES) ==============
+def check_health_veto(
+    tech: Dict[str, Any],
+    fund_data: Dict[str, Any],
+    market_rsi: float = 50.0,
+    df: pd.DataFrame = None,
+    avg_volume_value: float = 0.0,
+    industry: str = ""
+) -> Dict[str, Any]:
+    """Kiểm tra VETO dựa trên 15 quy tắc sức khỏe (KHÔNG bao gồm R:R hay Định giá)
+
+    SECTOR-ADAPTIVE RULES (V3):
+    - VETO_Nợ: D/E > 1.5 cho Non-Financial sectors
+    - VETO_ROE: Lower threshold (10%) for capital-intensive sectors (Steel, Power, Chemicals)
+    - VETO_NPL: NPL > 3% for Banking sector
+
+    Args:
+        tech: Dict chỉ số kỹ thuật (price, cmf, rsi, adx, sma_50, bb_percent, ichimoku_status, ichimoku_tenkan, ichimoku_kijun, atr, volume_ratio)
+        fund_data: Dict dữ liệu cơ bản (roe, f_score, profit_growth, pe, pb, is_new_listing)
+        market_rsi: RSI thị trường chung
+        df: DataFrame giá để tính volume TB 20 phiên
+        avg_volume_value: Giá trị volume TB quy đổi sang tỷ đồng
+        industry: Ngành của cổ phiếu (để xác định sector-adaptive rules)
+
+    Returns:
+        Dict: is_vetoed (bool), veto_reason (str), veto_reasons (list)
+    """
+    veto_reasons = []
+    sector = get_sector_category(industry)
+    
+    # Determine capital-intensive flag for ROE threshold
+    is_capital_intensive = sector in ['manufacturing', 'real_estate']
+    roe_threshold = 10 if is_capital_intensive else 15
+
+    # ===== NHÓM 1: DÒNG TIỀN (3 rules) =====
+
+    # VETO_1: CMF < 0
+    cmf_val = tech.get('cmf', 0)
+    if cmf_val < 0:
+        veto_reasons.append(f"VETO_1: CMF < 0 ({cmf_val:.2f})")
+
+    # VETO_2: Volume TB 20 phiên < 15 tỷ
+    elif avg_volume_value < 15:
+        veto_reasons.append(f"VETO_2: VolTB20 < 15B ({avg_volume_value:.1f}B)")
+
+    # VETO_3: Volume_Ratio < 0.5
+    elif tech.get('volume_ratio', 1) < 0.5:
+        veto_reasons.append(f"VETO_3: VolRatio < 0.5 ({tech.get('volume_ratio', 0):.2f})")
+
+    # ===== NHÓM 2: XU HƯỚNG & ĐỘNG LƯỢNG (5 rules) =====
+
+    # VETO_4: Giá < SMA50
+    elif tech.get('price', 0) > 0 and tech.get('sma_50', 0) > 0:
+        if tech['price'] < tech['sma_50']:
+            veto_reasons.append("VETO_4: Giá < SMA50")
+
+    # VETO_5: Giá dưới mây Ichimoku hoặc mây đỏ
+    elif tech.get('ichimoku_status') == 'bearish':
+        veto_reasons.append("VETO_5: Ichimoku Bearish")
+
+    # VETO_6: ADX < 20
+    elif tech.get('adx', 25) < 20:
+        veto_reasons.append(f"VETO_6: ADX < 20 ({tech.get('adx', 0):.1f})")
+
+    # VETO_7: RSI > 80
+    elif tech.get('rsi', 50) > 80:
+        veto_reasons.append(f"VETO_7: RSI > 80 ({tech.get('rsi', 0):.1f})")
+
+    # VETO_8: bbPos > 105
+    elif tech.get('bb_percent', 50) > 105:
+        veto_reasons.append(f"VETO_8: BB% > 105 ({tech.get('bb_percent', 0):.1f})")
+
+    # ===== NHÓM 3: SỨC KHỎE TÀI CHÍNH (5 rules) =====
+
+    # VETO_14: D/E > 1.5 (Non-Financial sectors only)
+    elif sector != 'banking':
+        de = fund_data.get('debt_equity') or fund_data.get('de') or 0
+        if de > 1.5:
+            veto_reasons.append(f"VETO_14: D/E > 1.5 ({de:.2f})")
+
+    # VETO_15: NPL > 3% (Banking only)
+    elif sector == 'banking':
+        npl = fund_data.get('npl') or fund_data.get('npl_ratio') or 0
+        if npl > 3:
+            veto_reasons.append(f"VETO_15: NPL > 3% ({npl:.2f}%)")
+
+    # VETO_9: ROE < threshold (10% for capital-intensive, 15% for others)
+    elif fund_data.get('roe') is not None:
+        roe_val = fund_data['roe']
+        if roe_val < roe_threshold:
+            threshold_note = "10%" if is_capital_intensive else "15%"
+            veto_reasons.append(f"VETO_9: ROE < {threshold_note} ({roe_val:.1f}%)")
+
+    # VETO_10: F-Score < 5
+    elif fund_data.get('f_score', 0) < 5:
+        veto_reasons.append(f"VETO_10: F-Score < 5 ({fund_data.get('f_score', 0)}/9)")
+
+    # VETO_11: Profit_Growth < 0 (trừ cổ phiếu mới listing)
+    elif not fund_data.get('is_new_listing', False):
+        pg = fund_data.get('profit_growth')
+        if pg is not None and pg < 0:
+            veto_reasons.append(f"VETO_11: ProfitGrowth < 0 ({pg:.1f}%)")
+
+    # VETO_12: Thiếu dữ liệu tài chính
+    elif fund_data.get('roe') is None or fund_data.get('pe') is None or fund_data.get('pb') is None:
+        veto_reasons.append("VETO_12: Thiếu dữ liệu tài chính")
+
+    # ===== NHÓM 4: THỊ TRƯỜNG (1 rule) =====
+
+    # VETO_13: VNIndex RSI > 80
+    elif market_rsi > 80:
+        veto_reasons.append(f"VETO_13: Market RSI > 80 ({market_rsi:.1f})")
+
+    # ===== KẾT QUẢ =====
+    is_vetoed = len(veto_reasons) > 0
+    veto_reason = "; ".join(veto_reasons) if veto_reasons else ""
+
+    return {
+        "is_vetoed": is_vetoed,
+        "veto_reason": veto_reason,
+        "veto_reasons": veto_reasons,
+        "sector": sector,
+        "roe_threshold_used": roe_threshold
+    }
+
+
 # ============== CORE LOGIC ENGINE (SHARED) ==============
 # Hàm thuần túy - KHÔNG gọi API, chỉ tính toán từ dữ liệu đầu vào
 # Dùng chung cho cả Live scan và Backtest
@@ -828,30 +1562,49 @@ def compute_core_logic(
     
     # Target = Entry + 5%
     target_5pct = round(entry * 1.05, 2)
-    
-    # ========== TRADING LEVELS ==========
-    atr_value = tech.get("atr", 0) if tech.get("atr", 0) > 0 else entry * 0.02
-    min_distance_pct = 0.03
-    min_distance = entry * min_distance_pct
-    
-    raw_sl = entry - (atr_value * 1.5)
-    if raw_sl >= entry:
-        raw_sl = entry * (1 - min_distance_pct)
-        has_inverted_sl = True
+
+    # ========== TRADING LEVELS: SL ONLY (Price Structure Based) ==========
+    # Support = min(SMA50, Low 20 phiên)
+    sma_50_support = tech.get("sma_50", 0)
+    low_20_val = 0
+    if df is not None and 'low' in df.columns and len(df) >= 20:
+        low_20_val = df['low'].tail(20).min()
+
+    # Chọn support thấp hơn
+    if sma_50_support > 0 and low_20_val > 0:
+        support_price = min(sma_50_support, low_20_val)
+    elif low_20_val > 0:
+        support_price = low_20_val
+    elif sma_50_support > 0:
+        support_price = sma_50_support
     else:
-        has_inverted_sl = False
-    
-    stop_loss = round(raw_sl, 2)
+        support_price = entry * 0.97
+
+    # Stop Loss = Support * 0.985 (tối đa 1.5% dưới support)
+    stop_loss = round(support_price * 0.985, 2)
+
+    # ===== MINIMUM RISK BUFFER (3%) =====
+    # Kiểm tra khoảng cách rủi ro, nếu < 3% thì điều chỉnh SL
+    risk_percent = (entry - stop_loss) / entry if entry > 0 else 0
+    if risk_percent < 0.03:
+        stop_loss = round(entry * 0.96, 2)  # Cố định 4% risk
+
+    # Inverted SL check
+    has_inverted_sl = stop_loss >= entry
+
+    # ATR cho tính Est Days (không dùng cho SL)
+    atr_value = tech.get("atr", 0) if tech.get("atr", 0) > 0 else entry * 0.02
+
     take_profit = round(entry + (atr_value * 3), 2)
-    
-    # Use real R:R ratio
+
+    # Preliminary R:R (sẽ recalc sau khi có FV_weekly)
     risk = entry - stop_loss
-    
-    # Anti-infinity: Nếu risk <= 0 (Stop Loss >= Entry), gán RR = 0
-    # Tránh chia cho 0 hoặc kết quả vô cực như trường hợp VIB
+    rr_ratio = 0
+    is_inverted_risk = False
     if risk > 0:
         rr_ratio = round((take_profit - entry) / risk, 2)
     else:
+        is_inverted_risk = True
         rr_ratio = 0
     
     # ========== TARGET YIELD & EST. DAYS ==========
@@ -877,15 +1630,19 @@ def compute_core_logic(
     
     est_days = min(max(est_days, 1), 30)
     
-    # Timeframe Label
-    if est_days <= 5:
-        timeframe_label = "Fast T+"
+    # Timeframe Label (merged with est days)
+    est_days_rounded = round(est_days)
+    if est_days <= 3:
+        timeframe_label = f"Fast T+ ({est_days_rounded}d)"
+        timeframe_color = "emerald"
+    elif est_days <= 7:
+        timeframe_label = f"Swing ({est_days_rounded}d)"
         timeframe_color = "emerald"
     elif est_days <= 15:
-        timeframe_label = "Swing Pick"
+        timeframe_label = f"Swing ({est_days_rounded}d)"
         timeframe_color = "sky"
     else:
-        timeframe_label = "Position"
+        timeframe_label = f"Position ({est_days_rounded}d+)"
         timeframe_color = "amber"
     
     profit_per_day = round(target_yield_pct / est_days, 2) if est_days > 0 else 0
@@ -965,93 +1722,30 @@ def compute_core_logic(
         criteria_names.append("ST")
     
     criteria_met = len(criteria)
-    
-    # ========== VETO CHECK (10 RULES - STRICT) ==========
-    is_vetoed = False
-    veto_reason = ""
-    veto_count = 0
+
+    # ========== HEALTH VETO CHECK (13 RULES) ==========
+    # Tính avg_volume_value trước khi gọi check_health_veto
+    avg_volume_value = 0.0
+    if df is not None and 'volume' in df.columns and price_val > 0:
+        avg_volume_value = round(volume_ratio_val * price_val * df['volume'].tail(20).mean() / 1e9, 1)
+
+    # Gọi hàm check_health_veto với 13 quy tắc (KHÔNG bao gồm R:R hay Định giá)
+    health_result = check_health_veto(
+        tech=tech,
+        fund_data=fund_data,
+        market_rsi=market_rsi,
+        df=df,
+        avg_volume_value=avg_volume_value
+    )
+
+    is_vetoed = health_result["is_vetoed"]
+    veto_reason = health_result["veto_reason"]
+
+    # NOTE: R:R < 1.0 và các điều kiện liên quan KHÔNG còn là VETO
+    # Chúng sẽ được xử lý như WARNING/CONCERN trong Bước 2
+
     has_high_resistance = False
-    
-    # Veto 1: CMF < 0 (spec)
-    if cmf_val < 0:
-        is_vetoed = True
-        veto_reason = f"CMF < 0 ({cmf_val:.2f})"
-        veto_count += 1
-    
-    # Veto 2: ROE < 15% (spec)
-    elif roe_val is not None and roe_val < 15:
-        is_vetoed = True
-        veto_reason = f"ROE < 15% ({roe_val:.1f}%)"
-        veto_count += 1
-    
-    # Veto 3: F-Score < 5/9 (spec)
-    elif f_score_val < 5:
-        is_vetoed = True
-        veto_reason = f"F-Score < 5 ({f_score_val}/9)"
-        veto_count += 1
-    
-    # Veto 4: Market RSI > 80 (spec)
-    elif market_rsi > 80:
-        is_vetoed = True
-        veto_reason = f"Market RSI > 80 ({market_rsi:.1f})"
-        veto_count += 1
-    
-    # Veto 5: Ichimoku Bearish (spec) - Check TK-KJ Bearish
-    elif ichimoku_status_val == "bearish":
-        is_vetoed = True
-        veto_reason = "Ichimoku Bearish"
-        veto_count += 1
-    
-    # Veto 6: TK-KJ Bearish (Tenkan < Kijun) (spec)
-    elif tech.get("ichimoku_tenkan", 0) < tech.get("ichimoku_kijun", 0) and tech.get("ichimoku_tenkan", 0) > 0:
-        is_vetoed = True
-        veto_reason = "TK < KJ (Bearish)"
-        veto_count += 1
-    
-    # Veto 7: R:R < 1.0 (spec)
-    elif rr_ratio < 1.0:
-        is_vetoed = True
-        veto_reason = f"R:R < 1.0 ({rr_ratio:.2f})"
-        veto_count += 1
-    
-    # Veto 8: Inverted SL (Entry <= Stop Loss) (spec)
-    elif has_inverted_sl:
-        is_vetoed = True
-        veto_reason = "Inverted SL (Entry <= SL)"
-        veto_count += 1
-    
-    # Veto 9: ATR = 0 (spec)
-    elif atr_value <= 0:
-        is_vetoed = True
-        veto_reason = "ATR = 0"
-        veto_count += 1
-    
-    # Veto 10: Missing Financial Data (spec) - NO FALLBACK DATA
-    elif roe_val is None or fund_data.get('pe') is None or fund_data.get('pb') is None:
-        is_vetoed = True
-        veto_reason = "Missing Financial Data"
-        veto_count += 1
-    
-    # Veto 11: Profit Growth âm (Rule 13 - Profit Growth Strategy)
-    # profit_growth được lấy từ fund_data (đã có sẵn trong dict)
-    profit_growth_for_veto = fund_data.get('profit_growth')
-    is_new_listing = fund_data.get('is_new_listing', False)
-    
-    if profit_growth_for_veto is not None and profit_growth_for_veto < 0:
-        # NEW_LISTING: Không VETO trừ khi lợi nhuận thực tế âm
-        if is_new_listing:
-            # Cổ phiếu mới: chỉ VETO nếu profit_growth == 0.001 (placeholder) hay thực sự âm?
-            # 0.001 là giá trị placeholder, không nên coi là âm
-            if profit_growth_for_veto < 0 and profit_growth_for_veto != 0.001:
-                is_vetoed = True
-                veto_reason = f"Lợi nhuận tăng trưởng âm ({profit_growth_for_veto:.1f}%)"
-                veto_count += 1
-        else:
-            # Cổ phiếu thường: VETO nếu tăng trưởng âm
-            is_vetoed = True
-            veto_reason = f"Lợi nhuận tăng trưởng âm ({profit_growth_for_veto:.1f}%)"
-            veto_count += 1
-    
+
     # Safe Entry
     safe_entry_distance = 0
     if sma_20_val > 0 and price_val > 0:
@@ -1229,15 +1923,47 @@ def compute_core_logic(
     elif market_rsi < 40:
         market_weight = +10
     
-    # Master Score = 70% Technical + 30% Fundamental (per spec v10)
+    # ========== RELATIVE STRENGTH (RS) BONUS/PENALTY ==========
+    # RS compares stock return vs Sector Index return vs VNIndex return
+    # Leader: Stock > Sector > Market -> +15 boost
+    # Laggard: Stock < Sector < Market -> -10 penalty
+    industry_perf = fund_data.get('industry_performance', 0)
+    rs_bonus = 0
+    rs_label = "NEUTRAL"
+    
+    if industry_perf >= 5:
+        # Stock outperforming sector
+        rs_bonus = 15
+        rs_label = "LEADER"
+    elif industry_perf >= 2:
+        rs_bonus = 8
+        rs_label = "OUTPERFORM"
+    elif industry_perf <= -5:
+        # Stock underperforming sector
+        rs_bonus = -10
+        rs_label = "LAGGARD"
+    elif industry_perf <= -2:
+        rs_bonus = -5
+        rs_label = "UNDERPERFORM"
+    
+    # Master Score = 70% Technical + 30% Fundamental + RS Bonus (per spec v3)
     base_master_score = int(tech_score * 0.7 + fund_score * 0.3)
     
     # VETO: Set master_score = 10 (strict per spec)
     if is_vetoed:
         master_score = 10
         base_master_score = 10
+        rs_bonus = 0  # No RS bonus for vetoed stocks
+        rs_label = "VETO"
     else:
-        master_score = max(0, min(100, base_master_score + market_weight))
+        master_score = max(0, min(100, base_master_score + market_weight + rs_bonus))
+    
+    # Store RS info for UI
+    rs_info = {
+        'bonus': rs_bonus,
+        'label': rs_label,
+        'industry_performance': industry_perf
+    }
     
     # ========== TREND ==========
     if sma_20_val > 0 and sma_50_val > 0:
@@ -1254,55 +1980,127 @@ def compute_core_logic(
     avg_volume_value = 0
     if df is not None and 'volume' in df.columns:
         avg_volume_value = round(volume_ratio_val * price_val * df['volume'].tail(20).mean() / 1e9, 1)
-    
-    # ========== INDUSTRY CONFIG ==========
+
+    # ========== INDUSTRY CONFIG (needed for FV) ==========
     industry = fund_data.get('industry', 'Default')
     industry_key = next((k for k in INDUSTRY_CONFIG if k.lower() in industry.lower()), 'Default')
-    config = INDUSTRY_CONFIG.get(industry_key, INDUSTRY_CONFIG['Default'])
-    
-    # Fair Value calculations
+
+    # ========== FAIR VALUE: DYNAMIC SECTOR VALUATION (v10.3) ==========
     vwap_val = tech.get('vwap', price_val)
     sma10_val = tech.get('sma_10', price_val)
     sma20_val_t = tech.get('sma_20', price_val)
-    
-    # FV Daily: (VWAP * 0.4) + (SMA20 * 0.6) - giảm nhiễu ngắn hạn
+
+    # FV Daily: (VWAP * 0.4) + (SMA20 * 0.6)
     fv_daily = round((vwap_val * 0.4) + (sma20_val_t * 0.6), 2)
-    
-    # FV Weekly: Intrinsic-based formula (per spec v10)
-    # Priority: pe_industry_avg from API > INDUSTRY_CONFIG target
-    pe_industry_avg = fund_data.get('pe_industry_avg', 0) or 0
-    industry_target_pe = config.get('target', 11.0)
-    
-    # Use API value if available, else fallback to config
+
+    # Get dynamic sector valuation (Median-based với Wealth Guard Cap)
     actual_pe = fund_data.get('pe') or 0
+    val_config = get_target_valuation(industry_key)
     
-    # Calculate Intrinsic Value
-    if pe_industry_avg > 0:
-        # Use API-provided industry average
-        intrinsic = price_val * (pe_industry_avg / actual_pe) if actual_pe > 0 else price_val
-    elif industry_target_pe > 0:
-        # Fallback to INDUSTRY_CONFIG
-        intrinsic = price_val * (industry_target_pe / actual_pe) if actual_pe > 0 else price_val
+    # Sử dụng Dynamic Median PE hoặc Fallback (đã apply Wealth Guard Cap trong get_target_valuation)
+    target_pe = val_config['target']
+    pe_valuation = price_val * (target_pe / actual_pe) if actual_pe > 0 else price_val
+    
+    # Track valuation source for display
+    valuation_source = val_config['source']
+    valuation_cap_applied = val_config['cap_applied']
+    sector_median_pe = val_config['dynamic']
+
+    # 52-week high based valuation (nếu có data)
+    high_52w = tech.get('high_52w', 0)
+    if high_52w > 0:
+        high_52w_valuation = high_52w  # Dùng luôn đỉnh cao 52 tuần
     else:
-        intrinsic = price_val
-    
-    # FV_Weekly = (Intrinsic * FundScore + TakeProfit * TechScore) / (FundScore + TechScore)
-    if fund_score + tech_score > 0:
-        fv_weekly = (intrinsic * fund_score + take_profit * tech_score) / (fund_score + tech_score)
-    else:
-        fv_weekly = fv_daily
-    
+        high_52w_valuation = price_val * 1.20  # Fallback: giả định đỉnh cao hơn 20%
+
+    # FV Weekly = Trung bình P/E valuation và 52-week high valuation
+    fv_weekly = (pe_valuation + high_52w_valuation) / 2
     fv_weekly = round(fv_weekly, 2)
-    
+
+    # Cap FV_weekly at 130% of current price (không định giá ảo)
+    max_fv = price_val * 1.30
+    if fv_weekly > max_fv:
+        fv_weekly = round(max_fv, 2)
+
     # Market Risk Adjustment: -10% when Market RSI > 75
     if market_rsi > 75:
         fv_weekly = round(fv_weekly * 0.9, 2)
+
+    # ===== UPDATE TAKE_PROFIT = FV_WEEKLY =====
+    take_profit = round(fv_weekly, 2)
+
+    # ===== TRAILING STOP (Step 4) =====
+    # Trailing SL = 5% below current price
+    trailing_sl = round(price_val * 0.95, 2)
     
-    # Valuation Status - Nếu bị VETO thì hiển thị RISK
+    # Final SL = max(support_SL, trailing_SL)
+    final_stop_loss = max(stop_loss, trailing_sl)
+    
+    # Update stop_loss to final value
+    stop_loss = final_stop_loss
+
+    # ===== RECALCULATE R:R WITH FINAL STOP LOSS =====
+    risk = entry - stop_loss
+    if risk > 0:
+        rr_ratio = round((take_profit - entry) / risk, 2)
+    else:
+        rr_ratio = 0
+        is_inverted_risk = True
+
+    # ========== RECOMMENDATION LABEL ==========
+    # Format: Signal (Strategy Group)
+    # GOLD: Score >= 70, GUERRILLA: Score >= 55, RISK: Score < 55, VETO: is_vetoed
+    if is_vetoed:
+        strategy_group = "VETO"
+    elif master_score >= 70:
+        strategy_group = "GOLD"
+    elif master_score >= 55:
+        strategy_group = "GUERRILLA"
+    else:
+        strategy_group = "RISK"
+
+    recommendation_label = f"{signal} ({strategy_group})"
+
+    # ===== UPDATE EST. DAYS & TARGET YIELD =====
+    target_yield_pct = round((take_profit - entry) / entry * 100, 2) if entry > 0 else 0
+    price_diff = take_profit - entry
+    if atr_value > 0 and atr_value < entry:
+        est_days = price_diff / (atr_value * trend_factor)
+    elif atr_value > 0:
+        est_days = price_diff / (atr_value * trend_factor)
+    else:
+        est_days = price_diff / (entry * 0.02 * trend_factor) if entry > 0 else 10
+    est_days = min(max(est_days, 1), 30)
+    profit_per_day = round(target_yield_pct / est_days, 2) if est_days > 0 else 0
+
+    # Valuation Status - Chỉ "Rẻ" nếu Price < FV * 0.9 (biên an toàn 10%)
     if is_vetoed:
         valuation_status = "RISK"
     else:
-        valuation_status = "Rẻ" if price_val < fv_weekly else "Đắt"
+        safe_threshold = fv_weekly * 0.9
+        valuation_status = "Rẻ" if price_val < safe_threshold else "Đắt"
+
+    # ===== R:R QUALITY GRADING =====
+    rr_quality = ""
+    rr_quality_detail = ""
+    rr_warning = ""
+
+    if rr_ratio >= 10:
+        rr_quality = "⚠️ Warning"
+        rr_quality_detail = "Cắt lỗ quá sát, rủi ro nhiễu cao"
+        rr_warning = f"⚠️ Cắt lỗ quá sát, rủi ro nhiễu cao"
+    elif 5.0 <= rr_ratio < 10:
+        rr_quality = "💎 Diamond"
+        rr_quality_detail = "Kèo cực phẩm - R:R vượt ngưỡng"
+    elif 2.5 <= rr_ratio < 5.0:
+        rr_quality = "⭐ Golden"
+        rr_quality_detail = "Vùng R:R lý tưởng"
+    elif 1.5 <= rr_ratio < 2.5:
+        rr_quality = "Good"
+        rr_quality_detail = "R:R khả thi"
+    else:
+        rr_quality = "Poor"
+        rr_quality_detail = "R:R thấp"
     
     # ========== RETURN ==========
     return {
@@ -1342,14 +2140,21 @@ def compute_core_logic(
         # Trading levels
         "entry_price": entry,
         "stop_loss": stop_loss,
+        "trailing_sl": trailing_sl,
         "take_profit": take_profit,
         "risk_reward_ratio": rr_ratio,
+        "rr_quality": rr_quality,
+        "rr_quality_detail": rr_quality_detail,
+        "rr_warning": rr_warning,
         # Fair Value
         "fv_daily": fv_daily,
         "fv_weekly": fv_weekly,
         "valuation_status": valuation_status,
-        "intrinsic_value": round(intrinsic, 2),
-        "industry_config": config,
+        "intrinsic_value": round(pe_valuation, 2),
+        "sector_median_pe": sector_median_pe,
+        "valuation_source": valuation_source,
+        "valuation_cap_applied": valuation_cap_applied,
+        "industry_config": val_config,
         # Target Yield & Est. Days
         "target_yield_pct": target_yield_pct,
         "trend_factor": trend_factor,
@@ -1379,10 +2184,13 @@ def compute_core_logic(
         "stock_risk_level": stock_risk_level,
         "stock_risk_reason": stock_risk_reason,
         "has_inverted_sl": has_inverted_sl,
+        "is_inverted_risk": is_inverted_risk,
         # Criteria
         "criteria_met": criteria_met,
         "criteria_list": criteria,
         "criteria_names": criteria_names,
+        # Recommendation Label
+        "recommendation_label": recommendation_label,
         # Trend
         "trend": trend,
         "breakout_status": "BREAKOUT" if is_fast_pick and not is_vetoed else ("VETO" if is_vetoed else "WAIT"),
@@ -1405,6 +2213,7 @@ def compute_core_logic(
         # Real R:R
         "hard_risk_pct": round(hard_risk_pct, 2),
         "support_price": round(support_price, 2),
+        "risk_percent": round(risk_percent * 100, 2),
         # P/E Industry
         "pe_industry_avg": fund_data.get('pe_industry_avg') or 0,
         # Early Exit
@@ -1420,6 +2229,10 @@ def compute_core_logic(
         "risk_tolerance_pct": 2.0,
         # Industry
         "industry": industry,
+        # Relative Strength (RS)
+        "rs_bonus": rs_info['bonus'],
+        "rs_label": rs_info['label'],
+        "rs_industry_performance": rs_info['industry_performance'],
     }
 
 
@@ -1457,7 +2270,7 @@ def get_top_symbols_by_liquidity() -> List[str]:
         liquidity_data = []
         for symbol in candidates:
             try:
-                q = Quote(symbol=symbol)
+                q = Quote(symbol=symbol, source="kbs")
                 df = q.history(
                     start=(datetime.now() - pd.Timedelta(days=30)).strftime("%Y-%m-%d"),
                     end=datetime.now().strftime("%Y-%m-%d"),
@@ -1465,7 +2278,7 @@ def get_top_symbols_by_liquidity() -> List[str]:
                 )
                 if df is not None and len(df) >= 10:
                     avg_volume = df['volume'].tail(20).mean()
-                    avg_price = df['close'].tail(5).mean()
+                    avg_price = df['close'].tail(5).mean() * 1000  # KBS trả giá đã chia 1000
                     avg_value = avg_volume * avg_price
 
                     if avg_price > MIN_PRICE and avg_value > MIN_LIQUIDITY_BILLION * 1e9:
@@ -1785,7 +2598,7 @@ def analyze_stock(symbol: str, market_rsi: float = 50.0, fast_mode: bool = False
         # Get Price Data - try vnstock_data first
         df = None
         try:
-            from vnstock_data import Market  # pyright: ignore[reportMissingImports]
+            from vnstock_data import Market
             mkt = Market()
             df = mkt.equity(symbol).ohlcv(
                 start=(datetime.now() - pd.Timedelta(days=250)).strftime("%Y-%m-%d"),
@@ -1804,7 +2617,7 @@ def analyze_stock(symbol: str, market_rsi: float = 50.0, fast_mode: bool = False
         if df is None:
             try:
                 from vnstock import Quote
-                q = Quote(symbol=symbol)
+                q = Quote(symbol=symbol, source="kbs")
                 df = q.history(
                     start=(datetime.now() - pd.Timedelta(days=250)).strftime("%Y-%m-%d"),
                     end=datetime.now().strftime("%Y-%m-%d"),
@@ -1847,16 +2660,6 @@ def analyze_stock(symbol: str, market_rsi: float = 50.0, fast_mode: bool = False
         
         # Add company_name (only for live analysis)
         result['company_name'] = company_name
-        
-        # DEBUG: Log values for first few symbols
-        if not hasattr(analyze_stock, '_call_count'):
-            analyze_stock._call_count = 0
-        analyze_stock._call_count += 1
-        if analyze_stock._call_count <= 5:
-            print(f"[DEBUG {symbol}] Entry={result['entry_price']}, TP={result['take_profit']}, "
-                  f"ATR={result['atr']}, ADX={result['adx']}, Factor={result['trend_factor']}, "
-                  f"TargetYield={result['target_yield_pct']}%, EstDays={result['estimated_days_to_target']}, "
-                  f"Profit/Day={result['expected_profit_per_day']}")
 
         return result
 
@@ -2026,7 +2829,7 @@ def save_results_to_db(results: List[Dict[str, Any]]) -> int:
 
     # Get VN30 list
     try:
-        from vnstock_data import Reference  # pyright: ignore[reportMissingImports]
+        from vnstock_data import Reference
         ref = Reference()
         vn30_list = list(ref.equity.list_by_group(group="VN30")['symbol'].str.upper())
     except:
@@ -2095,8 +2898,12 @@ def save_results_to_db(results: List[Dict[str, Any]]) -> int:
                     "signal": data["signal"],
                     "entry_price": data["entry_price"],
                     "stop_loss": data["stop_loss"],
+                    "trailing_sl": data.get("trailing_sl", 0),
                     "take_profit": data["take_profit"],
                     "risk_reward_ratio": data["risk_reward_ratio"],
+                    "rr_quality": data.get("rr_quality", ""),
+                    "rr_quality_detail": data.get("rr_quality_detail", ""),
+                    "rr_warning": data.get("rr_warning", ""),
                     "is_vetoed": data["is_vetoed"],
                     "veto_reason": data["veto_reason"],
                     "is_fast_pick": data["is_fast_pick"],
@@ -2107,6 +2914,7 @@ def save_results_to_db(results: List[Dict[str, Any]]) -> int:
                     "stock_risk_level": data.get("stock_risk_level", "Medium"),
                     "stock_risk_reason": data.get("stock_risk_reason", ""),
                     "has_inverted_sl": data["has_inverted_sl"],
+                    "is_inverted_risk": data.get("is_inverted_risk", False),
                     # New fields
                     "is_safe_entry": data.get("is_safe_entry", False),
                     "has_high_resistance": data.get("has_high_resistance", False),
@@ -2135,11 +2943,15 @@ def save_results_to_db(results: List[Dict[str, Any]]) -> int:
                     "target_yield_pct": data.get("target_yield_pct", 0),
                     "criteria_met": data["criteria_met"],
                     "criteria_list": data["criteria_list"],
-                    # Fair Value (v10)
+                    "recommendation_label": data.get("recommendation_label", ""),
+                    # Fair Value (v10.3 - Dynamic Sector Valuation)
                     "fv_daily": data.get("fv_daily", 0),
                     "fv_weekly": data.get("fv_weekly", 0),
                     "valuation_status": data.get("valuation_status", "N/A"),
                     "intrinsic_value": data.get("intrinsic_value", 0),
+                    "sector_median_pe": data.get("sector_median_pe", 0),
+                    "valuation_source": data.get("valuation_source", "static"),
+                    "valuation_cap_applied": data.get("valuation_cap_applied", False),
                     "trend": data["trend"],
                     "breakout_status": data["breakout_status"],
                     "market_rsi": data["market_rsi"],
@@ -2246,3 +3058,229 @@ def get_sync_status() -> Optional[Dict[str, Any]]:
         }
     except:
         return None
+
+
+def diagnose_stock(symbol: str) -> Dict[str, Any]:
+    """
+    Diagnostic tool cho một mã cổ phiếu - Single Stock Test Mode
+    
+    Chạy full sync pipeline cho một mã và trả về chi tiết tất cả các bước:
+    - Raw data từ API
+    - Valuation info (từ DB hay Config)
+    - Computed FV Daily/Weekly
+    - Criteria passed/failed
+    - VETO reasons (if any)
+    
+    Args:
+        symbol: Mã cổ phiếu cần diagnose
+        
+    Returns:
+        Dict chứa chi tiết đầy đủ của quá trình tính toán
+    """
+    print(f"\n{'='*80}")
+    print(f"🔍 DIAGNOSTIC REPORT: {symbol}")
+    print(f"{'='*80}\n")
+    
+    result = {
+        "symbol": symbol.upper(),
+        "timestamp": datetime.now().isoformat(),
+        "steps": {},
+        "summary": {}
+    }
+    
+    try:
+        # ========== STEP 1: Get Raw Technical Data ==========
+        print("[1/5] Fetching technical data...")
+        result["steps"]["technical"] = {}
+        
+        try:
+            from vnstock import Quote
+            q = Quote(symbol=symbol, source="vci")
+            df = q.history(
+                start=(datetime.now() - pd.Timedelta(days=90)).strftime("%Y-%m-%d"),
+                end=datetime.now().strftime("%Y-%m-%d"),
+                interval="1D"
+            )
+            
+            if df is not None and len(df) > 0:
+                tech = calculate_technical_indicators(df)
+                result["steps"]["technical"]["status"] = "success"
+                result["steps"]["technical"]["raw_data"] = {
+                    "price": float(df['close'].iloc[-1]),
+                    "volume": int(df['volume'].iloc[-1]),
+                    "rows": len(df)
+                }
+                result["steps"]["technical"]["indicators"] = tech
+                print(f"  ✅ Price: {tech.get('price')}, RSI: {tech.get('rsi')}, CMF: {tech.get('cmf')}")
+            else:
+                result["steps"]["technical"]["status"] = "error"
+                result["steps"]["technical"]["error"] = "No data returned"
+                print(f"  ❌ No data returned")
+                return result
+        except Exception as e:
+            result["steps"]["technical"]["status"] = "error"
+            result["steps"]["technical"]["error"] = str(e)
+            print(f"  ❌ Error: {e}")
+            return result
+        
+        # ========== STEP 2: Get Raw Fundamental Data ==========
+        print("[2/5] Fetching fundamental data...")
+        result["steps"]["fundamental"] = {}
+        
+        try:
+            fund_data = get_fundamental_data(symbol, fast_mode=False)
+            result["steps"]["fundamental"]["status"] = "success"
+            result["steps"]["fundamental"]["raw_data"] = {
+                "roe": fund_data.get("roe"),
+                "pe": fund_data.get("pe"),
+                "pb": fund_data.get("pb"),
+                "f_score": fund_data.get("f_score"),
+                "industry": fund_data.get("industry"),
+                "profit_growth": fund_data.get("profit_growth")
+            }
+            print(f"  ✅ ROE: {fund_data.get('roe')}, PE: {fund_data.get('pe')}, PB: {fund_data.get('pb')}")
+            print(f"  ✅ F-Score: {fund_data.get('f_score')}, Industry: {fund_data.get('industry')}")
+        except Exception as e:
+            result["steps"]["fundamental"]["status"] = "error"
+            result["steps"]["fundamental"]["error"] = str(e)
+            print(f"  ❌ Error: {e}")
+            fund_data = {}
+        
+        # ========== STEP 3: Get Market RSI ==========
+        print("[3/5] Fetching market RSI...")
+        result["steps"]["market"] = {}
+        
+        market_rsi = get_market_rsi()
+        result["steps"]["market"]["status"] = "success"
+        result["steps"]["market"]["data"] = {"vnindex_rsi": market_rsi}
+        print(f"  ✅ VNIndex RSI: {market_rsi}")
+        
+        # ========== STEP 4: Valuation Info ==========
+        print("[4/5] Analyzing valuation...")
+        result["steps"]["valuation"] = {}
+        
+        industry = fund_data.get('industry', 'Default')
+        industry_key = next((k for k in INDUSTRY_CONFIG if k.lower() in industry.lower()), 'Default')
+        
+        # Get from IndustryValuation DB
+        db_valuation = None
+        try:
+            iv = IndustryValuation.objects.filter(name=industry_key, is_active=True).first()
+            if iv:
+                db_valuation = {
+                    "name": iv.name,
+                    "median_pe": iv.median_pe,
+                    "median_pb": iv.median_pb,
+                    "stock_count": iv.stock_count,
+                    "source": "database"
+                }
+        except:
+            pass
+        
+        # Get from Config
+        config_val = INDUSTRY_CONFIG.get(industry_key, INDUSTRY_CONFIG['Default'])
+        
+        # Get resolved valuation
+        val_config = get_target_valuation(industry_key)
+        
+        result["steps"]["valuation"]["industry"] = industry_key
+        result["steps"]["valuation"]["database_valuation"] = db_valuation
+        result["steps"]["valuation"]["config_valuation"] = config_val
+        result["steps"]["valuation"]["resolved"] = val_config
+        
+        print(f"  Industry: {industry_key}")
+        print(f"  Database Median PE: {db_valuation.get('median_pe') if db_valuation else 'N/A'}")
+        print(f"  Config Target: {config_val.get('target')}")
+        print(f"  Resolved Target: {val_config.get('target')} (Source: {val_config.get('source')})")
+        print(f"  Wealth Guard Cap Applied: {val_config.get('cap_applied')}")
+        
+        # ========== STEP 5: Compute Core Logic ==========
+        print("[5/5] Running core computation...")
+        result["steps"]["computation"] = {}
+        
+        try:
+            # Get market group
+            try:
+                stock = StockData.objects.get(symbol=symbol.upper())
+                market_group = stock.market_group or "UNKNOWN"
+            except:
+                market_group = "UNKNOWN"
+            
+            analysis = compute_core_logic(
+                symbol=symbol,
+                tech=tech,
+                fund_data=fund_data,
+                market_rsi=market_rsi,
+                market_group=market_group,
+                df=df if 'df' in dir() else None
+            )
+            
+            result["steps"]["computation"]["status"] = "success"
+            result["steps"]["computation"]["analysis"] = analysis
+            
+            print(f"\n  📊 COMPUTED VALUES:")
+            print(f"  ├── FV Daily: {analysis.get('fv_daily')}")
+            print(f"  ├── FV Weekly: {analysis.get('fv_weekly')}")
+            print(f"  ├── Intrinsic Value: {analysis.get('intrinsic_value')}")
+            print(f"  ├── Take Profit: {analysis.get('take_profit')}")
+            print(f"  ├── Stop Loss: {analysis.get('stop_loss')}")
+            print(f"  └── R:R Ratio: {analysis.get('risk_reward_ratio')}")
+            
+        except Exception as e:
+            result["steps"]["computation"]["status"] = "error"
+            result["steps"]["computation"]["error"] = str(e)
+            print(f"  ❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # ========== SUMMARY ==========
+        print(f"\n{'='*80}")
+        print("📋 SUMMARY")
+        print(f"{'='*80}")
+        
+        if result["steps"].get("computation", {}).get("status") == "success":
+            analysis = result["steps"]["computation"]["analysis"]
+            
+            print(f"\n  🎯 SIGNAL: {analysis.get('signal')}")
+            print(f"  📈 MASTER SCORE: {analysis.get('master_score')}")
+            print(f"  📉 TECH SCORE: {analysis.get('tech_score')}")
+            print(f"  💰 FUND SCORE: {analysis.get('fund_score')}")
+            
+            # Criteria
+            criteria_met = analysis.get('criteria_met', 0)
+            criteria_list = analysis.get('criteria_list', [])
+            print(f"\n  ✅ CRITERIA MET: {criteria_met}/12")
+            if criteria_list:
+                print(f"     {', '.join(criteria_list)}")
+            
+            # VETO
+            is_vetoed = analysis.get('is_vetoed', False)
+            veto_reason = analysis.get('veto_reason', '')
+            print(f"\n  {'🚫 VETO' if is_vetoed else '✅ NO VETO'}")
+            if is_vetoed:
+                print(f"     Reason: {veto_reason}")
+            
+            # Fair Value Status
+            print(f"\n  💵 VALUATION:")
+            print(f"     Status: {analysis.get('valuation_status')}")
+            print(f"     Source: {analysis.get('valuation_source')}")
+            print(f"     Sector Median PE: {analysis.get('sector_median_pe')}")
+            
+            result["summary"] = {
+                "signal": analysis.get('signal'),
+                "master_score": analysis.get('master_score'),
+                "is_vetoed": is_vetoed,
+                "veto_reason": veto_reason,
+                "fv_weekly": analysis.get('fv_weekly'),
+                "valuation_status": analysis.get('valuation_status'),
+                "valuation_source": analysis.get('valuation_source')
+            }
+        
+        print(f"\n{'='*80}\n")
+        
+    except Exception as e:
+        result["error"] = str(e)
+        import traceback
+        traceback.print_exc()
+    
+    return result

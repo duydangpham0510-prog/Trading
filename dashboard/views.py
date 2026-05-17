@@ -733,6 +733,7 @@ def stock_list(request: HttpRequest) -> HttpResponse:
             "signal": a.signal,
             "criteria_met": a.criteria_met,
             "criteria_list": a.criteria_list,
+            "recommendation_label": getattr(a, 'recommendation_label', ''),
             "risk_reward_ratio": a.risk_reward_ratio,
             # Target Yield
             "target_yield_pct": getattr(a, 'target_yield_pct', None) or round((a.take_profit - (a.entry_price or s.price)) / (a.entry_price or s.price) * 100, 2) if a.take_profit and (a.entry_price or s.price) > 0 else 0,
@@ -810,99 +811,85 @@ def stock_list(request: HttpRequest) -> HttpResponse:
 def export_stocks_csv(request: HttpRequest) -> HttpResponse:
     """Export tất cả stocks ra CSV"""
     import csv
-    from django.http import HttpResponse  # pyright: ignore[reportMissingImports]
+    from django.http import HttpResponse
     from .models import StockData, StockAnalysis
+    from .services.valuation_engine import get_valuation_service
 
     analyses = StockAnalysis.objects.select_related("symbol").all()
+    valuation_service = get_valuation_service()
 
     response = HttpResponse(content_type="text/csv; charset=utf-8")
-    # Add BOM for UTF-8 Excel compatibility
     response.write('\ufeff')
     response["Content-Disposition"] = f'attachment; filename="stocks_export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv"'
 
     writer = csv.writer(response)
     writer.writerow([
-        "Symbol", "Company", "Industry", "Market Group", "Price", "Change%", "Volume (B)", "Volume Ratio",
-        "RSI", "ADX", "CMF", "ATR", "MFI", "SMA10", "SMA20", "SMA50", "VWAP", "Ichimoku", "SuperTrend",
-        "ROE", "P/E", "P/B", "F-Score", "Profit Growth", "Profit Growth Note", "Is New Listing",
-        "Master Score", "Base Score", "Market Weight", "Tech Score", "Fund Score", "Signal",
-        "Target Yield %", "R:R Ratio", "Hard Risk %", "Est. Days", "Timeframe", "Trend Factor",
-        "Entry", "Stop Loss", "Take Profit", "Support Price", "Profit/Day",
+        "Symbol", "Company", "Industry", "Price", "Change%",
         "FV Daily", "FV Weekly", "Valuation Status",
-        "VETO Label", "Is Vetoed", "Veto Reason", "Is Fast Pick", "Is Safe Entry", "Has High Resistance",
-        "Foreign Streak", "Foreign Bonus", "Industry Perf", "Is Industry Leader",
-        "Is Market High Risk", "Stock Risk Level", "Stock Risk Reason",
-        "Market RSI", "Trend", "Breakout Status"
+        "Signal", "Recommendation Label", "Strategy Group",
+        "Master Score", "Tech Score", "Fund Score",
+        "R:R Ratio", "R:R Quality", "Hard Risk %",
+        "Est. Days", "Timeframe", "Trend Factor",
+        "Entry", "Stop Loss", "Take Profit",
+        "VETO Label", "Is Vetoed", "Veto Reason",
+        "Market RSI", "Stock Risk Level", "Is Market High Risk",
+        "Criteria Met", "Is Fast Pick"
     ])
 
     for a in analyses:
         s = a.symbol
         avg_vol_b = getattr(a, 'avg_volume_value', 0) or (s.volume_ratio * s.price * 1e6 / 1e9 if s.volume_ratio and s.price else 0)
 
-        # Calculate FV Daily and FV Weekly based on Industry Config
+        # Prepare data for ValuationService
         industry = s.industry or 'Default'
-        industry_key = next((k for k in INDUSTRY_CONFIG if k.lower() in industry.lower()), 'Default')
-        config = INDUSTRY_CONFIG.get(industry_key, INDUSTRY_CONFIG['Default'])
-
-        # fv_daily = (vwap * 0.6) + (sma10 * 0.4)
-        vwap_val = s.vwap or s.price or 0
-        sma10_val = s.sma_10 or s.price or 0
-        fv_daily = round((vwap_val * 0.6) + (sma10_val * 0.4), 2)
-
-        # intrinsic_value based on industry type
         price_val = s.price or 0
-        if config['type'] == 'PB' and s.pb and s.pb > 0:
-            intrinsic_value = round((config['target'] / s.pb) * price_val, 2)
-        elif s.pe and s.pe > 0:
-            intrinsic_value = round((config['target'] / s.pe) * price_val, 2)
-        else:
-            intrinsic_value = price_val
-
-        # fv_weekly = weighted average of intrinsic_value and take_profit
-        tech_score = a.technical_score or 50
-        fund_score = a.fundamental_score or 50
-        take_profit = a.take_profit or price_val
-        fv_weekly = round(((intrinsic_value * fund_score) + (take_profit * tech_score)) / (fund_score + tech_score), 2)
-
-        # Risk adjustment if market RSI > 75
-        market_rsi = a.market_rsi or 50
-        if market_rsi > 75:
-            fv_weekly = round(fv_weekly * 0.9, 2)
-
-        # Valuation Status - Nếu VETO thì hiển thị RISK
-        if a.is_vetoed:
-            valuation_status = "RISK"
-        else:
-            valuation_status = "Rẻ" if price_val < fv_weekly else "Đắt"
+        
+        # Use ValuationService to get consistent calculations
+        tech_data = {
+            'vwap': s.vwap or price_val,
+            'sma_10': s.sma_10 or price_val,
+            'sma_20': s.sma_20 or price_val,
+            'price': price_val,
+        }
+        fund_data = {
+            'industry': industry,
+            'pe': getattr(s, 'pe', None),
+            'pb': getattr(s, 'pb', None),
+        }
+        
+        val_result = valuation_service.compute_fair_value(
+            price=price_val,
+            tech=tech_data,
+            fund_data=fund_data,
+            market_rsi=a.market_rsi or 50,
+            is_vetoed=a.is_vetoed
+        )
+        
+        fv_daily = val_result.fv_daily
+        fv_weekly = val_result.fv_weekly
+        valuation_status = val_result.valuation_status
         
         # VETO label
         veto_label = "🚫 VETOED" if a.is_vetoed else ""
         
+        # Extract strategy group from recommendation_label (format: "SIGNAL (GROUP)")
+        recommendation_label = getattr(a, 'recommendation_label', '') or ''
+        strategy_group = recommendation_label.split('(')[-1].replace(')', '').strip() if '(' in recommendation_label else ''
+
         writer.writerow([
-            s.symbol, s.company_name, s.industry or s.get_industry(), s.market_group or s.get_market_group(),
-            s.price, s.change_percent,
-            f"{avg_vol_b:.1f}", s.volume_ratio,
-            s.rsi, s.adx, s.cmf, s.atr, s.mfi, s.sma_10, s.sma_20, s.sma_50, s.vwap, s.ichimoku_status, s.supertrend_signal,
-            s.roe, s.pe, s.pb, s.f_score, 
-            getattr(s, 'profit_growth', None), getattr(s, 'profit_growth_note', 'N/A'), 
-            "Yes" if getattr(s, 'is_new_listing', False) else "No",
-            a.master_score, getattr(a, 'base_master_score', a.master_score), getattr(a, 'market_weight', 0),
-            a.technical_score, a.fundamental_score, a.signal,
-            getattr(a, 'target_yield_pct', 0) or round((a.take_profit - (a.entry_price or s.price)) / (a.entry_price or s.price) * 100, 2) if a.take_profit and (a.entry_price or s.price) > 0 else 0,
-            a.risk_reward_ratio, getattr(a, 'hard_risk_pct', 0),
-            a.estimated_days_to_target, a.timeframe_label, getattr(a, 'trend_factor', 0.6),
-            a.entry_price, a.stop_loss, a.take_profit, getattr(a, 'support_price', 0), a.expected_profit_per_day,
+            s.symbol, s.company_name, s.industry or s.get_industry(), s.price, s.change_percent,
             fv_daily, fv_weekly, valuation_status,
+            a.signal, recommendation_label, strategy_group,
+            a.master_score, a.technical_score, a.fundamental_score,
+            a.risk_reward_ratio, getattr(a, 'rr_quality', ''), getattr(a, 'hard_risk_pct', 0),
+            round(a.estimated_days_to_target, 1) if a.estimated_days_to_target else '',
+            a.timeframe_label, getattr(a, 'trend_factor', 0.6),
+            a.entry_price, a.stop_loss, a.take_profit,
             veto_label, "Yes" if a.is_vetoed else "No", a.veto_reason,
-            "Yes" if a.is_fast_pick else "No",
-            "Yes" if getattr(a, 'is_safe_entry', False) else "No",
-            "Yes" if getattr(a, 'has_high_resistance', False) else "No",
-            getattr(a, 'foreign_buy_streak', 0), getattr(a, 'foreign_bonus', 0),
-            getattr(a, 'industry_performance', 0), "Yes" if getattr(a, 'is_industry_leader', True) else "No",
-            "Yes" if getattr(a, 'is_market_high_risk', False) else "No",
+            round(a.market_rsi, 0) if a.market_rsi else '',
             getattr(a, 'stock_risk_level', 'Medium'),
-            getattr(a, 'stock_risk_reason', ''),
-            a.market_rsi, a.trend, a.breakout_status
+            "Yes" if getattr(a, 'is_market_high_risk', False) else "No",
+            a.criteria_met, "Yes" if a.is_fast_pick else "No"
         ])
 
     return response
@@ -911,14 +898,17 @@ def export_stocks_csv(request: HttpRequest) -> HttpResponse:
 def export_stock_detail_csv(request: HttpRequest, symbol: str) -> HttpResponse:
     """Export chi tiết một mã cổ phiếu ra CSV với cấu trúc theo Sections"""
     import csv
-    from django.http import HttpResponse, Http404  # pyright: ignore[reportMissingImports]
+    from django.http import HttpResponse, Http404
     from .models import StockData, StockAnalysis
+    from .services.valuation_engine import get_valuation_service
 
     try:
         stock = StockData.objects.get(symbol=symbol.upper())
         analysis = StockAnalysis.objects.get(symbol=stock)
     except (StockData.DoesNotExist, StockAnalysis.DoesNotExist):
         raise Http404(f"Không tìm thấy mã {symbol}")
+
+    valuation_service = get_valuation_service()
 
     response = HttpResponse(content_type="text/csv; charset=utf-8")
     response.write('\ufeff')
@@ -946,49 +936,39 @@ def export_stock_detail_csv(request: HttpRequest, symbol: str) -> HttpResponse:
     writer.writerow([])
     writer.writerow(["=== DỰ BÁO GIÁ TRỊ HỢP LÝ (WEALTH GUARD) ==="])
 
-    # Calculate FV Daily and FV Weekly
+    # Use ValuationService for consistent calculations
     industry = stock.industry or 'Default'
-    industry_key = next((k for k in INDUSTRY_CONFIG if k.lower() in industry.lower()), 'Default')
-    config = INDUSTRY_CONFIG.get(industry_key, INDUSTRY_CONFIG['Default'])
-
     price_val = stock.price or 0
-    vwap_val = stock.vwap or price_val
-    sma10_val = stock.sma_10 or price_val
+    
+    tech_data = {
+        'vwap': stock.vwap or price_val,
+        'sma_10': stock.sma_10 or price_val,
+        'sma_20': stock.sma_20 or price_val,
+        'price': price_val,
+    }
+    fund_data = {
+        'industry': industry,
+        'pe': stock.pe,
+        'pb': stock.pb,
+    }
+    
+    val_result = valuation_service.compute_fair_value(
+        price=price_val,
+        tech=tech_data,
+        fund_data=fund_data,
+        market_rsi=analysis.market_rsi or 50,
+        is_vetoed=analysis.is_vetoed
+    )
 
-    # fv_daily = (vwap * 0.6) + (sma10 * 0.4)
-    fv_daily = round((vwap_val * 0.6) + (sma10_val * 0.4), 2)
-
-    # intrinsic_value based on industry type
-    if config['type'] == 'PB' and stock.pb and stock.pb > 0:
-        intrinsic_value = round((config['target'] / stock.pb) * price_val, 2)
-    elif stock.pe and stock.pe > 0:
-        intrinsic_value = round((config['target'] / stock.pe) * price_val, 2)
-    else:
-        intrinsic_value = price_val
-
-    # fv_weekly = weighted average
-    tech_score = analysis.technical_score or 50
-    fund_score = analysis.fundamental_score or 50
-    take_profit = analysis.take_profit or price_val
-    fv_weekly = round(((intrinsic_value * fund_score) + (take_profit * tech_score)) / (fund_score + tech_score), 2)
-
-    # Risk adjustment if market RSI > 75
-    market_rsi = analysis.market_rsi or 50
-    if market_rsi > 75:
-        fv_weekly = round(fv_weekly * 0.9, 2)
-
-    # Valuation Status - Nếu VETO thì hiển thị RISK
-    if analysis.is_vetoed:
-        valuation_status = "RISK"
-    else:
-        valuation_status = "Rẻ" if price_val < fv_weekly else "Đắt"
-
-    writer.writerow(["FV Trong Ngày (Daily)", fv_daily])
-    writer.writerow(["FV Trong Tuần (Weekly)", fv_weekly])
-    writer.writerow(["Trạng Thái Định Giá", valuation_status])
-    writer.writerow(["Giá Trị Nội Tại (Intrinsic)", intrinsic_value])
-    writer.writerow(["Loại Định Giá Ngành", config['type']])
-    writer.writerow(["Target Ngành", config['target']])
+    writer.writerow(["FV Trong Ngày (Daily)", val_result.fv_daily])
+    writer.writerow(["FV Trong Tuần (Weekly)", val_result.fv_weekly])
+    writer.writerow(["Trạng Thái Định Giá", val_result.valuation_status])
+    writer.writerow(["Giá Trị Nội Tại (Intrinsic)", val_result.intrinsic_value])
+    writer.writerow(["Loại Định Giá Ngành", val_result.valuation_type])
+    writer.writerow(["Target Ngành", val_result.target_pe])
+    writer.writerow(["Nguồn Valuation", val_result.valuation_source])
+    writer.writerow(["Sector Median PE", val_result.sector_median_pe])
+    writer.writerow(["Wealth Guard Cap Applied", "Yes" if val_result.cap_applied else "No"])
 
     # Section 3: ĐIỂM PHÂN TÍCH
     writer.writerow([])
@@ -1005,12 +985,15 @@ def export_stock_detail_csv(request: HttpRequest, symbol: str) -> HttpResponse:
     writer.writerow(["=== MỨC GIAO DỊCH ==="])
     writer.writerow(["Entry Price", analysis.entry_price])
     writer.writerow(["Stop Loss", analysis.stop_loss])
-    writer.writerow(["Take Profit", analysis.take_profit])
+    writer.writerow(["Trailing SL (5% từ đỉnh)", analysis.trailing_sl])
+    writer.writerow(["Take Profit (FV Weekly)", analysis.take_profit])
     writer.writerow(["R:R Ratio", analysis.risk_reward_ratio])
+    writer.writerow(["R:R Quality", analysis.rr_quality or "N/A"])
     writer.writerow(["Est. Days", analysis.estimated_days_to_target])
     writer.writerow(["Timeframe", analysis.timeframe_label])
     writer.writerow(["Lợi nhuận/ngày", analysis.expected_profit_per_day])
     writer.writerow(["% Upside/ngày", analysis.upside_per_day])
+    writer.writerow(["Chiến lược SL", "Trailing Stop 5% từ đỉnh hoặc Hỗ trợ cứng"])
 
     writer.writerow([])
     writer.writerow(["=== CHỈ BÁO KỸ THUẬT ==="])

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from django import forms
 
-from .services import get_function_definition
+from dashboard.services import get_function_definition
 
 
 class DynamicFunctionForm(forms.Form):

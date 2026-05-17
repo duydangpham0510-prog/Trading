@@ -1,13 +1,128 @@
 # SYSTEM LOGIC SPECIFICATIONS
-## VN30 Alpha Scanner v10.1 - UNIFIED LOGIC (Database-First Architecture)
+## VN30 Alpha Scanner v10.2 - UNIFIED LOGIC (Database-First Architecture)
 
-**Document Version:** 3.1  
-**Last Updated:** 2026-05-16  
-**Status:** Unified - Backend is Single Source of Truth  
+**Document Version:** 3.4
+**Last Updated:** 2026-05-17
+**Status:** Unified - Backend is Single Source of Truth
 
 ---
 
-## CHANGES IN v10.1 (2026-05-16)
+## CHANGES IN v10.4 (2026-05-17)
+
+### Task 1: Centralized Valuation Logic
+- Tạo `dashboard/services/valuation_engine.py` với class `ValuationService`
+- Singleton pattern: `get_valuation_service()`
+- Tính FV Daily, FV Weekly, Intrinsic Value tập trung
+- Sử dụng bởi cả `sync_service.py` và `views.py`
+
+### Task 2: Handle Negative P/E
+- `sync_sector_benchmarks()` đã filter `ttm_pe > 0` và `ttm_pb > 0`
+- Fallback về `INDUSTRY_CONFIG` nếu stock_count < 3 sau filter
+
+### Task 3: Single Stock Diagnostic Tool
+- Hàm `diagnose_stock(symbol)` trong `sync_service.py`
+- In chi tiết tất cả bước: Raw data → Valuation → FV → Criteria → VETO
+- Trả về JSON với đầy đủ thông tin
+
+### Task 4: CSV Export Synchronization
+- `export_stocks_csv()` và `export_stock_detail_csv()` sử dụng `ValuationService`
+- Đảm bảo tính nhất quán 100% với backend
+
+### Task 5: IndustryValuation Priority
+- `get_industry_pe_average()` ưu tiên lấy từ `IndustryValuation` (đã filtered P/E > 0)
+- Fallback: VNINDEX PE → INDUSTRY_CONFIG
+
+---
+
+## PREVIOUS CHANGES (v10.3)
+
+### Dynamic Sector Valuation - MEDIAN-Based Real Market Data
+
+#### Bước 1: Model IndustryValuation
+```python
+class IndustryValuation(models.Model):
+    name = models.CharField(max_length=50, unique=True)  # VD: "Banking"
+    sector_code = models.CharField(max_length=20)  # ICB code
+    median_pe = models.FloatField(default=0)  # Median P/E của ngành
+    median_pb = models.FloatField(default=0)  # Median P/B của ngành
+    stock_count = models.IntegerField(default=0)  # Số mã trong ngành
+    market_cap_avg = models.FloatField(default=0)  # Vốn hóa TB
+    updated_at = models.DateTimeField(auto_now=True)
+```
+
+#### Bước 2: sync_sector_benchmarks()
+- **Source:** `vnstock_data.Insights().screener().filter()`
+- **Filter:** Vốn hóa > 100 tỷ, P/E 0-1000, P/B 0-50
+- **Aggregation:** MEDIAN (không phải Mean) để loại outliers
+- **Nhóm theo:** `vi_sector` column
+
+#### Bước 3: get_target_valuation()
+**Priority:**
+1. Dynamic Median từ `IndustryValuation` (database)
+2. Fallback sang `INDUSTRY_CONFIG` (static)
+3. **Wealth Guard Cap:** `Final = min(Dynamic, Static × 1.25)`
+
+#### Bước 4: compute_core_logic() Refactor
+- Sử dụng `get_target_valuation()` thay vì `INDUSTRY_CONFIG` trực tiếp
+- Tách biệt Intrinsic Value (P/E-based) ra khỏi 52-week high
+- FV Weekly = trung bình (Intrinsic + 52-week high)
+
+---
+
+## PREVIOUS CHANGES (v10.2)
+
+### Major Refactoring: Separation of VETO, Valuation, and R:R
+
+#### Bước 1: VETO Health Check (13 Rules) - STANDALONE
+- **Location:** `dashboard/sync_service.py` - `check_health_veto()`
+- **Purpose:** Chỉ kiểm tra sức khỏe, loại bỏ cổ phiếu rác/nguy hiểm
+- **KHÔNG bao gồm R:R hay Định giá trong VETO**
+
+**13 VETO Rules:**
+| # | Rule | Condition |
+|---|------|-----------|
+| 1 | CMF Negative | CMF < 0 |
+| 2 | Low Liquidity | VolTB20 < 15 tỷ |
+| 3 | No Interest | Volume_Ratio < 0.5 |
+| 4 | Downtrend | Giá < SMA50 |
+| 5 | Ichimoku Bearish | Mây đỏ/giá dưới mây |
+| 6 | No Trend | ADX < 20 |
+| 7 | Overbought Extreme | RSI > 80 |
+| 8 | BB Overbought | bbPos > 105 |
+| 9 | Low ROE | ROE < 15% |
+| 10 | Weak F-Score | F-Score < 5 |
+| 11 | Negative Growth | Profit_Growth < 0 |
+| 12 | Missing Data | Thiếu dữ liệu tài chính |
+| 13 | Market Risk | VNIndex RSI > 80 |
+
+#### Bước 2: Fair Value & R:R Thực Chiến
+- **FV_Weekly:** Trung bình của (P/E valuation) và (52-week high valuation)
+- **PE Multiplier Cap:** 1.25x
+- **FV Cap:** Không vượt quá 130% thị giá
+- **TP = FV_Weekly**
+
+#### Bước 3: Khoảng thở & R:R Quality
+- **Risk Buffer:** Tối thiểu 3% (điều chỉnh SL nếu cần)
+- **Valuation "Rẻ":** Chỉ khi Price < FV × 0.9 (biên an toàn 10%)
+- **R:R Quality Grading:**
+  - ⚠️ Warning: R:R > 7 (cắt lỗ quá sát)
+  - ⭐ Golden: 2.5 ≤ R:R ≤ 5.0
+  - Good: 1.5 ≤ R:R < 2.5
+  - Poor: R:R < 1.5
+
+#### Bước 4: Trailing Stop
+- **Trailing SL:** Price × 0.95 (5% từ đỉnh)
+- **Final SL:** max(Support_SL, Trailing_SL)
+- **R:R được recalculate với Final SL**
+
+#### Bước 5: UI Integration
+- R:R column: ⭐ cho Golden, ⚠️ cho Warning
+- VETO badge: màu đỏ rực, font bold
+- CSV export: thêm Trailing SL, R:R Quality, Chiến lược SL
+
+---
+
+## PREVIOUS CHANGES (v10.1)
 
 ### Core Logic Engine - `compute_core_logic()`
 - **Function Location:** `dashboard/sync_service.py`
@@ -795,7 +910,7 @@ df['foreign_buy'] = (price_change > 0).rolling(3).sum()
 
 ---
 
-## 5. Fair Value Calculation
+## 5. Fair Value Calculation (v10.2)
 
 ### 5.1 FV_Daily (Fair Value Daily)
 
@@ -803,7 +918,6 @@ df['foreign_buy'] = (price_change > 0).rolling(3).sum()
 
 **Formula:**
 ```python
-# Source: sync_service.py - compute_core_logic()
 fv_daily = (vwap_val * 0.4) + (sma20_val * 0.6)
 ```
 
@@ -821,51 +935,73 @@ FV_Daily = (95000 × 0.4) + (94500 × 0.6)
 
 ---
 
-### 5.2 FV_Weekly (Fair Value Weekly)
+### 5.2 FV_Weekly (Fair Value Weekly) - v10.2
 
-**Purpose:** Medium-term fair value based on intrinsic value and technical targets.
+**Purpose:** Medium-term fair value based on P/E valuation and 52-week high.
 
-**Formula (from `sync_service.py`):**
+**Formula (v10.2):**
 ```python
-# Step 1: Get Industry PE (Priority: API > Config)
+# Step 1: P/E Based Valuation (với cap 1.25x)
 pe_industry_avg = fund_data.get('pe_industry_avg', 0) or 0
 industry_target_pe = config.get('target', 11.0)
-
-# Use API value if available, else fallback to config
 actual_pe = fund_data.get('pe') or 0
 
-# Step 2: Calculate Intrinsic Value
 if pe_industry_avg > 0:
-    # Use API-provided industry average
-    intrinsic = price_val * (pe_industry_avg / actual_pe) if actual_pe > 0 else price_val
+    target_pe = pe_industry_avg * 1.25  # Cap at 1.25x
+    pe_valuation = price_val * (target_pe / actual_pe) if actual_pe > 0 else price_val
 elif industry_target_pe > 0:
-    # Fallback to INDUSTRY_CONFIG
-    intrinsic = price_val * (industry_target_pe / actual_pe) if actual_pe > 0 else price_val
+    target_pe = industry_target_pe * 1.25  # Cap at 1.25x
+    pe_valuation = price_val * (target_pe / actual_pe) if actual_pe > 0 else price_val
 else:
-    intrinsic = price_val
+    pe_valuation = price_val
 
-# Step 3: Calculate FV_Weekly
-fv_weekly = (intrinsic * fund_score + take_profit * tech_score) / (fund_score + tech_score)
+# Step 2: 52-Week High Based Valuation
+high_52w = tech.get('high_52w', 0)
+if high_52w > 0:
+    high_52w_valuation = high_52w  # Dùng luôn đỉnh cao 52 tuần
+else:
+    high_52w_valuation = price_val * 1.20  # Fallback: giả định đỉnh cao hơn 20%
 
-# Step 4: Market Risk Adjustment
+# Step 3: FV_Weekly = Trung bình của 2 valuation
+fv_weekly = (pe_valuation + high_52w_valuation) / 2
+
+# Step 4: Cap FV_weekly at 130% of current price
+max_fv = price_val * 1.30
+if fv_weekly > max_fv:
+    fv_weekly = max_fv
+
+# Step 5: Market Risk Adjustment (-10% when Market RSI > 75)
 if market_rsi > 75:
-    fv_weekly = fv_weekly * 0.9  # Reduce 10% in overbought market
+    fv_weekly = fv_weekly * 0.9
 ```
+
+**Key Changes in v10.2:**
+- FV_Weekly = Trung bình (P/E valuation + 52-week high valuation)
+- PE Multiplier Cap: 1.25x (thay vì không giới hạn)
+- FV Cap: 130% thị giá (không định giá ảo)
 
 **Example:**
 ```
 If:
-- price = 95,000
-- actual_PE = 12
-- pe_industry_avg = 14 (from API)
-- fund_score = 70
-- take_profit = 100,000
-- tech_score = 75
-- market_rsi = 65
+- price = 72,900
+- actual_PE = 15
+- pe_industry_avg = 12
+- high_52w = 95,000
+- market_rsi = 50
 
-intrinsic = 95000 × (14 / 12) = 110,833
-fv_weekly = (110833 × 70 + 100000 × 75) / (70 + 75) = 105,217
-# No adjustment since market_rsi = 65 < 75
+Step 1: target_pe = 12 * 1.25 = 15
+        pe_valuation = 72900 * (15 / 15) = 72,900
+
+Step 2: high_52w_valuation = 95,000
+
+Step 3: fv_weekly = (72,900 + 95,000) / 2 = 83,950
+
+Step 4: max_fv = 72,900 * 1.30 = 94,770
+        fv_weekly = 83,950 (OK, < max_fv)
+
+Step 5: market_rsi = 50 < 75, no adjustment
+
+Result: FV_Weekly = 83,950
 ```
 
 **Industry Config (for fallback):**
@@ -885,13 +1021,20 @@ INDUSTRY_CONFIG = {
 
 ---
 
-### 5.3 Valuation Status
+### 5.3 Valuation Status (v10.2)
 
-**Definition:** Whether current price is above or below fair value.
+**Definition:** Whether current price is above or below fair value with 10% safety margin.
 
+**Formula (v10.2):**
 ```python
-valuation_status = "Rẻ" if price_val < fv_weekly else "Đắt"
+# Chỉ "Rẻ" nếu Price < FV * 0.9 (biên an toàn 10%)
+safe_threshold = fv_weekly * 0.9
+valuation_status = "Rẻ" if price_val < safe_threshold else "Đắt"
 ```
+
+**Key Change in v10.2:**
+- "Rẻ" chỉ khi Price < FV × 0.9 (biên an toàn 10%)
+- Trước đây: Price < FV là đủ
 
 ---
 
@@ -1245,78 +1388,83 @@ function calculateWealthGuardScore(stock) {
 
 ## 9. VETO Rules
 
-### 9.1 Backend VETO (sync_service.py)
+### 9.1 Backend VETO (v10.2 - STANDALONE Health Check)
 
-**Location:** `dashboard/sync_service.py` - `compute_core_logic()`  
-**10 VETO Conditions:**
+**Location:** `dashboard/sync_service.py` - `check_health_veto()`
+**13 VETO Conditions (KHÔNG bao gồm R:R hay Định giá):**
 
 ```python
-# Veto 1: CMF < 0 (spec)
-if cmf_val < 0:
-    is_vetoed = True
-    veto_reason = f"CMF < 0 ({cmf_val:.2f})"
-    veto_count += 1
+def check_health_veto(tech, fund_data, market_rsi, df, avg_volume_value):
+    """Kiểm tra VETO dựa trên 13 quy tắc sức khỏe"""
 
-# Veto 2: ROE < 15% (spec)
-elif roe_val is not None and roe_val < 15:
-    is_vetoed = True
-    veto_reason = f"ROE < 15% ({roe_val:.1f}%)"
-    veto_count += 1
+    # ===== NHÓM 1: DÒNG TIỀN (3 rules) =====
+    # VETO_1: CMF < 0
+    if tech.get('cmf', 0) < 0:
+        return {"is_vetoed": True, "veto_reason": "VETO_1: CMF < 0"}
 
-# Veto 3: F-Score < 5/9 (spec)
-elif f_score_val < 5:
-    is_vetoed = True
-    veto_reason = f"F-Score < 5 ({f_score_val}/9)"
-    veto_count += 1
+    # VETO_2: Volume TB 20 phiên < 15 tỷ
+    elif avg_volume_value < 15:
+        return {"is_vetoed": True, "veto_reason": "VETO_2: VolTB20 < 15B"}
 
-# Veto 4: Market RSI > 80 (spec)
-elif market_rsi > 80:
-    is_vetoed = True
-    veto_reason = f"Market RSI > 80 ({market_rsi:.1f})"
-    veto_count += 1
+    # VETO_3: Volume_Ratio < 0.5
+    elif tech.get('volume_ratio', 1) < 0.5:
+        return {"is_vetoed": True, "veto_reason": "VETO_3: VolRatio < 0.5"}
 
-# Veto 5: Ichimoku Bearish (spec)
-elif ichimoku_status_val == "bearish":
-    is_vetoed = True
-    veto_reason = "Ichimoku Bearish"
-    veto_count += 1
+    # ===== NHÓM 2: XU HƯỚNG & ĐỘNG LƯỢNG (5 rules) =====
+    # VETO_4: Giá < SMA50
+    elif tech.get('price', 0) > 0 and tech.get('sma_50', 0) > 0:
+        if tech['price'] < tech['sma_50']:
+            return {"is_vetoed": True, "veto_reason": "VETO_4: Giá < SMA50"}
 
-# Veto 6: TK-KJ Bearish (Tenkan < Kijun) (spec)
-elif tech.get("ichimoku_tenkan", 0) < tech.get("ichimoku_kijun", 0) and tech.get("ichimoku_tenkan", 0) > 0:
-    is_vetoed = True
-    veto_reason = "TK < KJ (Bearish)"
-    veto_count += 1
+    # VETO_5: Giá dưới mây Ichimoku hoặc mây đỏ
+    elif tech.get('ichimoku_status') == 'bearish':
+        return {"is_vetoed": True, "veto_reason": "VETO_5: Ichimoku Bearish"}
 
-# Veto 7: R:R < 1.0 (spec)
-elif rr_ratio < 1.0:
-    is_vetoed = True
-    veto_reason = f"R:R < 1.0 ({rr_ratio:.2f})"
-    veto_count += 1
+    # VETO_6: ADX < 20
+    elif tech.get('adx', 25) < 20:
+        return {"is_vetoed": True, "veto_reason": "VETO_6: ADX < 20"}
 
-# Veto 8: Inverted SL (Entry <= Stop Loss) (spec)
-elif has_inverted_sl:
-    is_vetoed = True
-    veto_reason = "Inverted SL (Entry <= SL)"
-    veto_count += 1
+    # VETO_7: RSI > 80
+    elif tech.get('rsi', 50) > 80:
+        return {"is_vetoed": True, "veto_reason": "VETO_7: RSI > 80"}
 
-# Veto 9: ATR = 0 (spec)
-elif atr_value <= 0:
-    is_vetoed = True
-    veto_reason = "ATR = 0"
-    veto_count += 1
+    # VETO_8: bbPos > 105
+    elif tech.get('bb_percent', 50) > 105:
+        return {"is_vetoed": True, "veto_reason": "VETO_8: BB% > 105"}
 
-# Veto 10: Missing Financial Data (spec) - NO FALLBACK DATA
-elif roe_val is None or fund_data.get('pe') is None or fund_data.get('pb') is None:
-    is_vetoed = True
-    veto_reason = "Missing Financial Data"
-    veto_count += 1
+    # ===== NHÓM 3: SỨC KHỎE TÀI CHÍNH (4 rules) =====
+    # VETO_9: ROE < 15%
+    elif fund_data.get('roe') is not None and fund_data['roe'] < 15:
+        return {"is_vetoed": True, "veto_reason": "VETO_9: ROE < 15%"}
+
+    # VETO_10: F-Score < 5
+    elif fund_data.get('f_score', 0) < 5:
+        return {"is_vetoed": True, "veto_reason": "VETO_10: F-Score < 5"}
+
+    # VETO_11: Profit_Growth < 0 (trừ cổ phiếu mới listing)
+    elif not fund_data.get('is_new_listing', False):
+        pg = fund_data.get('profit_growth')
+        if pg is not None and pg < 0:
+            return {"is_vetoed": True, "veto_reason": "VETO_11: ProfitGrowth < 0"}
+
+    # VETO_12: Thiếu dữ liệu tài chính
+    elif fund_data.get('roe') is None or fund_data.get('pe') is None or fund_data.get('pb') is None:
+        return {"is_vetoed": True, "veto_reason": "VETO_12: Thiếu dữ liệu tài chính"}
+
+    # ===== NHÓM 4: THỊ TRƯỜNG (1 rule) =====
+    # VETO_13: VNIndex RSI > 80
+    elif market_rsi > 80:
+        return {"is_vetoed": True, "veto_reason": "VETO_13: Market RSI > 80"}
+
+    return {"is_vetoed": False, "veto_reason": ""}
 ```
 
 **VETO Effect:**
 - `master_score` = 10 (strict cap)
-- `tech_score` = max(25, tech_score - 30)
-- `is_fast_pick` = False
 - `signal` = "WAIT"
+- Vẫn tính toán các chỉ số khác nhưng nhãn hiển thị là 🚫 VETO
+
+**Note:** R:R < 1.0 và Inverted SL đã được chuyển thành **Status Tags/Warnings**, không còn là VETO.
 
 ---
 
@@ -1793,7 +1941,7 @@ SLOW_THRESHOLD_DAYS = 10  # Mark as SLOW if > 10 days
 
 ---
 
-## 14. Trading Levels Calculation
+## 14. Trading Levels Calculation (v10.2)
 
 ### 14.1 Entry Price
 
@@ -1804,83 +1952,139 @@ entry_price = current_price
 
 ---
 
-### 14.2 Stop Loss Calculation
+### 14.2 Stop Loss Calculation (v10.2 - Support-Based + Trailing)
 
-**Location:** `dashboard/analyzers/vn30_scanner.py`  
-**Method:** `_calculate_trading_levels()`  
+**Location:** `dashboard/sync_service.py` - `compute_core_logic()`
+
+**Step 1: Calculate Support Price**
+```python
+# Support = min(SMA50, Low_20)
+sma_50_support = tech.get("sma_50", 0)
+low_20_val = df['low'].tail(20).min() if df is not None else 0
+
+if sma_50_support > 0 and low_20_val > 0:
+    support_price = min(sma_50_support, low_20_val)
+elif low_20_val > 0:
+    support_price = low_20_val
+elif sma_50_support > 0:
+    support_price = sma_50_support
+else:
+    support_price = entry * 0.97
+```
+
+**Step 2: Calculate Support-Based SL**
+```python
+# Stop Loss = Support * 0.985 (tối đa 1.5% dưới support)
+stop_loss_support = round(support_price * 0.985, 2)
+```
+
+**Step 3: Calculate Trailing SL (5% from price)**
+```python
+# Trailing SL = 5% below current price
+trailing_sl = round(price_val * 0.95, 2)
+```
+
+**Step 4: Final SL = max(Support_SL, Trailing_SL)**
+```python
+final_stop_loss = max(stop_loss_support, trailing_sl)
+```
+
+**Step 5: Minimum Risk Buffer (3%)**
+```python
+# Kiểm tra khoảng cách rủi ro, nếu < 3% thì điều chỉnh SL
+risk_percent = (entry - final_stop_loss) / entry
+if risk_percent < 0.03:
+    final_stop_loss = round(entry * 0.96, 2)  # Cố định 4% risk
+```
+
+**Summary:**
+- Support SL = min(SMA50, Low_20) × 0.985
+- Trailing SL = Price × 0.95
+- Final SL = max(Support SL, Trailing SL)
+- Minimum Risk = 4% (nếu risk < 3%, điều chỉnh SL = Entry × 0.96)
+
+---
+
+### 14.3 Take Profit Calculation (v10.2 - FV-Based)
+
+**Take Profit = FV_Weekly (xem Section 5)**
 
 ```python
-def _calculate_stop_loss(self, pick: StockPick):
-    """
-    Stop Loss = FV_Daily - (ATR × 1.5)
-    Must be at least 3% below entry
-    """
-    min_sl_distance = pick.current_price * 0.03  # 3% minimum
-    
-    # Find natural support levels
-    bb_lower_support = pick.bb_lower if pick.bb_lower > 0 else 0
-    sma20_support = pick.sma_20 if pick.sma_20 > 0 else 0
-    atr_support = pick.current_price - (pick.atr * 2) if pick.atr > 0 else 0
-    
-    supports = [s for s in [bb_lower_support, sma20_support, atr_support] if s > 0]
-    
-    if supports:
-        raw_sl = max(supports)
-        # Ensure at least 3% from entry
-        if pick.current_price - raw_sl < min_sl_distance:
-            raw_sl = pick.current_price - min_sl_distance
-    else:
-        # No support -> use 5% below entry
-        raw_sl = pick.current_price * 0.95
-        pick.has_inverted_sl = True
-    
-    # Final check: SL must be < Entry
-    if raw_sl >= pick.current_price:
-        pick.has_inverted_sl = True
-        raw_sl = pick.current_price * 0.95
-    
-    pick.stop_loss = round(raw_sl, 2)
+take_profit = round(fv_weekly, 2)
 ```
 
 ---
 
-### 14.3 Take Profit Calculation
-
-```python
-def _calculate_take_profit(self, pick: StockPick):
-    """
-    Take Profit = min(BB_Upper, Entry + 10%)
-    """
-    bb_upper_tp = pick.bb_upper if pick.bb_upper > 0 else 0
-    target_tp = pick.current_price * 1.10  # 10% target
-    
-    if bb_upper_tp > 0:
-        pick.take_profit = round(min(bb_upper_tp, target_tp), 2)
-    else:
-        pick.take_profit = round(target_tp, 2)
-```
-
----
-
-### 14.4 Risk:Reward Ratio
+### 14.4 Risk:Reward Ratio (v10.2)
 
 ```python
 def _calculate_rr_ratio(self, pick: StockPick):
     """
     R:R = (TP - Entry) / (Entry - SL)
+    Sử dụng Final Stop Loss (đã bao gồm Trailing)
     """
-    risk = pick.entry_price - pick.stop_loss
-    reward = pick.take_profit - pick.entry_price
-    
-    if risk >= min_sl_distance:  # Ensure risk >= 3%
-        pick.risk_reward_ratio = round(reward / risk, 2)
+    risk = entry_price - final_stop_loss
+    reward = take_profit - entry_price
+
+    if risk > 0:
+        risk_reward_ratio = round(reward / risk, 2)
     else:
-        pick.risk_reward_ratio = 0  # Invalid
+        risk_reward_ratio = 0
+        is_inverted_risk = True
 ```
 
 ---
 
-### 14.5 Complete Trading Levels Example
+### 14.5 R:R Quality Grading (v10.2)
+
+**Location:** `dashboard/sync_service.py` - `compute_core_logic()`
+
+```python
+# R:R QUALITY GRADING
+if rr_ratio > 7:
+    rr_quality = "⚠️ Warning"
+    rr_quality_detail = "Cắt lỗ quá sát, rủi ro nhiễu cao"
+    rr_warning = f"⚠️ Cắt lỗ quá sát, rủi ro nhiễu cao"
+elif 2.5 <= rr_ratio <= 5.0:
+    rr_quality = "⭐ Golden"
+    rr_quality_detail = "Vùng R:R lý tưởng"
+elif 1.5 <= rr_ratio < 2.5:
+    rr_quality = "Good"
+    rr_quality_detail = "R:R khả thi"
+else:
+    rr_quality = "Poor"
+    rr_quality_detail = "R:R thấp"
+```
+
+**Quality Thresholds:**
+| Quality | R:R Range | Description |
+|---------|-----------|-------------|
+| ⚠️ Warning | > 7 | Cắt lỗ quá sát, rủi ro nhiễu cao |
+| ⭐ Golden | 2.5 - 5.0 | Vùng R:R lý tưởng |
+| Good | 1.5 - 2.5 | R:R khả thi |
+| Poor | < 1.5 | R:R thấp |
+
+---
+
+### 14.6 Complete Trading Levels Example (v10.2)
+
+```
+Given:
+- Current Price: 72,900
+- SMA50: 70,000
+- Low 20-day: 69,000
+- FV_Weekly: 92,367
+
+Calculations:
+1. Support = min(70,000, 69,000) = 69,000
+2. Support SL = 69,000 × 0.985 = 67,965
+3. Trailing SL = 72,900 × 0.95 = 69,255
+4. Final SL = max(67,965, 69,255) = 69,255
+5. Risk % = (72,900 - 69,255) / 72,900 = 5.0% (OK)
+6. TP = FV_Weekly = 92,367
+7. R:R = (92,367 - 72,900) / (72,900 - 69,255) = 5.34
+8. Quality = Poor (R:R > 5.0)
+```
 
 ```
 Given:

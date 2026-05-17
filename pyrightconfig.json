@@ -1,13 +1,18 @@
 {
   "include": ["dashboard"],
-  "extraPaths": [],
-  "pythonVersion": "3.11",
-  "typeCheckingMode": "basic",
+  "exclude": ["**/__pycache__", "**/migrations"],
+  "pythonVersion": "3.14",
+  "typeCheckingMode": "off",
   "reportMissingTypeStubs": false,
   "executionEnvironments": [
     {
       "root": ".",
-      "pythonVersion": "3.11"
+      "pythonVersion": "3.14"
     }
+  ],
+  "venvPath": "C:\\Users\\lantr",
+  "venv": ".venv",
+  "extraPaths": [
+    "C:\\Users\\lantr\\.venv\\Lib\\site-packages"
   ]
 }

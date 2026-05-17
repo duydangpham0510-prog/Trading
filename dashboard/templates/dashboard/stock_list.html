@@ -185,8 +185,56 @@
         .badge-medium { background: #f59e0b; color: #000; }
         .badge-gold { background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%); color: #000; }
         .badge-guerrilla { background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%); color: #fff; }
+        .badge-diamond { background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 50%, #a855f7 100%); color: #fff; box-shadow: 0 0 12px rgba(139, 92, 246, 0.5); }
         .badge-risk { background: #334155; color: #94a3b8; }
-        .badge-veto-group { background: #dc2626; color: #fff; }
+        .badge-veto-group { 
+            background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%); 
+            color: #fff; 
+            font-weight: 700; 
+            font-size: 12px; 
+            padding: 4px 10px;
+            box-shadow: 0 2px 8px rgba(220, 38, 38, 0.5);
+        }
+
+        /* Recommendation Label Styles - Strategy Group Styling */
+        .rec-label {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+            white-space: nowrap;
+        }
+        .rec-label-gold {
+            background: linear-gradient(135deg, rgba(251, 191, 36, 0.15) 0%, rgba(245, 158, 11, 0.25) 100%);
+            color: #fbbf24;
+            border: 1px solid rgba(251, 191, 36, 0.5);
+            box-shadow: 0 0 12px rgba(251, 191, 36, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+        }
+        .rec-label-guerrilla {
+            background: linear-gradient(135deg, rgba(34, 197, 94, 0.15) 0%, rgba(22, 163, 74, 0.2) 100%);
+            color: #4ade80;
+            border: 1px solid rgba(34, 197, 94, 0.4);
+            box-shadow: 0 0 8px rgba(34, 197, 94, 0.15);
+        }
+        .rec-label-risk {
+            background: rgba(148, 163, 184, 0.1);
+            color: #94a3b8;
+            border: 1px solid rgba(148, 163, 184, 0.3);
+        }
+        .rec-label-veto {
+            background: rgba(239, 68, 68, 0.1);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            opacity: 0.7;
+        }
+        .rec-label-default {
+            background: rgba(148, 163, 184, 0.1);
+            color: #cbd5e1;
+            border: 1px solid rgba(148, 163, 184, 0.2);
+        }
 
         /* Strategy Filter Bar */
         .strategy-filter-container {
@@ -381,13 +429,6 @@
         .score-high { background: #22c55e; }
         .score-medium { background: #f59e0b; }
         .score-low { background: #ef4444; }
-
-        .rsi-indicator {
-            font-weight: 600;
-        }
-        .rsi-overbought { color: #ef4444; }
-        .rsi-oversold { color: #22c55e; }
-        .rsi-neutral { color: #94a3b8; }
 
         .positive { color: #22c55e; }
         .negative { color: #ef4444; }
@@ -613,6 +654,19 @@
 .overvalued { 
     color: #ef4444 !important; 
 }
+
+/* R:R Quality Colors */
+.text-warning {
+    color: #f59e0b !important;
+    font-weight: 700;
+}
+.text-danger {
+    color: #ef4444 !important;
+}
+.text-diamond {
+    color: #8b5cf6 !important;
+    font-weight: 700;
+}
     </style>
 </head>
 <body>
@@ -748,20 +802,11 @@
                 <tr>
                     <th>#</th>
                     <th>Mã</th>
-                    <th>Nhóm</th>
                     <th>Giá</th>
-                    <th>Định Giá (N/T)</th> <!-- Cột 5: Mới bổ sung -->
-                    <th>Target Yield</th>
-                    <th>%/Day</th>
+                    <th>Định Giá (D/W)</th>
+                    <th>Khuyến Nghị</th>
                     <th>Score</th>
-                    <th>Signal</th>
-                    <th>Criteria</th>
-                    <th>R:R</th>
-                    <th>RSI</th>
-                    <th>CMF</th>
-                    <th>Cloud</th>
-                    <th>ROE</th>
-                    <th>F-Score</th>
+                    <th>R:R Quality</th>
                     <th>Timeframe</th>
                     <th>Trạng Thái</th>
                 </tr>
@@ -850,6 +895,10 @@
                     data-final-group="RISK"
                     {% endif %}
                     data-final-score="{{ stock.master_score }}"
+                    data-recommendation-label="{{ stock.recommendation_label|default:'' }}"
+                    data-sector="{{ stock.get_sector_category|default:'general' }}"
+                    data-rs-label="{{ stock.rs_label|default:'NEUTRAL' }}"
+                    data-rs-bonus="{{ stock.rs_bonus|default:'0' }}"
                     onclick="openStockModalFromRow(this)">
                     
                     <td>{{ forloop.counter }}</td>
@@ -858,54 +907,33 @@
                         <div class="company-cell">{{ stock.company_name }}</div>
                     </td>
                     <td>
-                        {% if stock.market_group == 'VN30' %}
-                            <span class="badge badge-qualified">{{ stock.market_group }}</span>
-                        {% else %}
-                            <span class="industry-badge">{{ stock.market_group|default:'MIDCAP' }}</span>
+                        {{ stock.price|floatformat:1 }}
+                        {% if stock.change_percent > 0 %}
+                            <span class="positive"> +{{ stock.change_percent|floatformat:1 }}%</span>
+                        {% elif stock.change_percent < 0 %}
+                            <span class="negative"> {{ stock.change_percent|floatformat:1 }}%</span>
                         {% endif %}
                     </td>
-                    <td>{{ stock.price|floatformat:1 }}</td>
-                    
+
                     <!-- Cột Định Giá Mới -->
                     <td class="valuation-cell" id="val-{{ stock.symbol }}">
                         <div class="fv-daily" style="font-size: 11px; color: #f59e0b; font-weight: 600;">Day: --</div>
                         <div class="fv-weekly" style="font-size: 12px; color: #3b82f6; font-weight: 700;">Week: --</div>
                     </td>
 
-                    <td class="{% if stock.target_yield_pct >= 5 %}positive{% elif stock.target_yield_pct >= 3 %}neutral{% else %}negative{% endif %}">
-                        +{{ stock.target_yield_pct|floatformat:1 }}%
-                    </td>
-                    <td class="{% if stock.upside_per_day > 0 %}positive{% elif stock.upside_per_day < 0 %}negative{% endif %}">
-                        {% if stock.upside_per_day > 0 %}+{% endif %}{{ stock.upside_per_day|floatformat:2 }}%
-                        <div style="font-size: 9px; color: #64748b;">{{ stock.expected_profit_per_day|floatformat:0 }}/ngày</div>
-                    </td>
-                    
-                    <!-- Score Bar (Bây giờ là cột thứ 8) -->
-                   <td class="score-value-cell" style="text-align: center; font-weight: 700; font-size: 14px;">--</td>
-                    
                     <td>
-                        <span class="badge {% if stock.signal == 'BUY' or stock.signal == 'STRONG_BUY' %}badge-buy{% elif stock.signal == 'SELL' %}badge-sell{% else %}badge-wait{% endif %}">
-                            {{ stock.signal }}
+                        <span class="recommendation-label"
+                            data-label="{{ stock.recommendation_label|default:'' }}">
+                            {{ stock.recommendation_label|default:stock.signal }}
                         </span>
                     </td>
-                    <td>
-                        <span class="badge {% if stock.criteria_met >= 9 %}badge-qualified{% elif stock.criteria_met >= 7 %}badge-buy{% else %}badge-wait{% endif %}">
-                            {{ stock.criteria_met }}/12
-                        </span>
-                    </td>
-                    <td>{{ stock.risk_reward_ratio|floatformat:2 }}</td>
-                    <td class="rsi-indicator">
-                        {{ stock.rsi|floatformat:0 }}
-                    </td>
-                    <td>{{ stock.cmf|floatformat:3 }}</td>
-                    <td>
-                        {% if stock.ichimoku_status == 'bullish' %}<span class="positive">🟢</span>{% else %}<span>🟡</span>{% endif %}
-                    </td>
-                    <td>{{ stock.roe|default:'-' }}</td>
-                    <td>
-                        <span class="badge {% if stock.f_score >= 7 %}badge-buy{% else %}badge-wait{% endif %}">
-                            {{ stock.f_score }}/9
-                        </span>
+
+                    <!-- Score Bar -->
+                    <td class="score-value-cell" style="text-align: center; font-weight: 700; font-size: 14px;">--</td>
+
+                    <td class="{% if stock.rr_quality == '💎 Diamond' %}text-diamond{% elif stock.rr_quality == '⭐ Golden' %}text-warning font-weight-bold{% elif stock.rr_quality == '⚠️ Warning' %}text-danger{% endif %}">
+                        {{ stock.risk_reward_ratio|floatformat:2 }}
+                        {% if stock.rr_quality == '💎 Diamond' %}💎{% elif stock.rr_quality == '⭐ Golden' %}⭐{% elif stock.rr_quality == '⚠️ Warning' %}⚠️{% endif %}
                     </td>
                     <td>{{ stock.timeframe_label }}</td>
                     <td class="status-cell">
@@ -1088,44 +1116,64 @@
                 const score = parseInt(row.dataset.finalScore) || 0;
                 const isVeto = row.dataset.isVeto === 'true';
                 const vetoReasons = row.dataset.vetoReasons || '';
-                
+                const recLabel = row.dataset.recommendationLabel || '';
+
                 // Thêm class row-veto nếu bị veto
                 if (isVeto) {
                     row.classList.add('row-veto');
                 } else {
                     row.classList.remove('row-veto');
                 }
-                
-                // ========== Cập nhật Score Bar ==========
-                const scoreCell = row.querySelector('td:nth-child(8)'); 
-if (scoreCell) {
-    // Gán số điểm
-    scoreCell.textContent = score;
-    
-    // Tự động đổi màu chữ dựa trên điểm số để thay thế cho thanh bar
-    if (score >= 70) {
-        scoreCell.style.color = '#22c55e'; // Xanh lá (Tốt)
-    } else if (score >= 50) {
-        scoreCell.style.color = '#f59e0b'; // Vàng cam (Trung bình)
-    } else {
-        scoreCell.style.color = '#ef4444'; // Đỏ (Yếu/Veto)
-    }
-}
 
-if (scoreCell) {
-    const scoreBar = scoreCell.querySelector('.score-bar .fill');
-    // Cách lấy text cũ childNodes[2] rất dễ lỗi nếu HTML thay đổi, hãy dùng querySelector cho chắc chắn:
-    const scoreText = scoreCell.querySelector('.score-text'); 
-    
-    if (scoreBar) {
-        scoreBar.style.width = score + '%';
-        scoreBar.classList.remove('score-high', 'score-medium', 'score-low');
-        scoreBar.classList.add(score >= 70 ? 'score-high' : score >= 50 ? 'score-medium' : 'score-low');
-    }
-    if (scoreText) {
-        scoreText.textContent = score;
-    }
-}
+                // ========== Cập nhật Recommendation Label Badge ==========
+                const recLabelCell = row.querySelector('td:nth-child(5)'); // Khuyến Nghị column
+                if (recLabelCell) {
+                    const badge = recLabelCell.querySelector('.recommendation-label');
+                    if (badge) {
+                        // Parse "SIGNAL (GROUP)" format
+                        const labelText = recLabel || row.dataset.signal || 'WAIT';
+                        badge.textContent = labelText;
+
+                        // Apply CSS class based on strategy group
+                        const groupClassMap = {
+                            'GOLD': 'rec-label rec-label-gold',
+                            'GUERRILLA': 'rec-label rec-label-guerrilla',
+                            'RISK': 'rec-label rec-label-risk',
+                            'VETO': 'rec-label rec-label-veto'
+                        };
+                        badge.className = groupClassMap[group] || 'rec-label rec-label-default';
+                    }
+                }
+
+                // ========== Cập nhật Score Bar ==========
+                const scoreCell = row.querySelector('td:nth-child(6)');
+                if (scoreCell) {
+                    // Gán số điểm
+                    scoreCell.textContent = score;
+
+                    // Tự động đổi màu chữ dựa trên điểm số
+                    if (score >= 70) {
+                        scoreCell.style.color = '#22c55e'; // Xanh lá (Tốt)
+                    } else if (score >= 50) {
+                        scoreCell.style.color = '#f59e0b'; // Vàng cam (Trung bình)
+                    } else {
+                        scoreCell.style.color = '#ef4444'; // Đỏ (Yếu/Veto)
+                    }
+                }
+
+                if (scoreCell) {
+                    const scoreBar = scoreCell.querySelector('.score-bar .fill');
+                    const scoreText = scoreCell.querySelector('.score-text');
+
+                    if (scoreBar) {
+                        scoreBar.style.width = score + '%';
+                        scoreBar.classList.remove('score-high', 'score-medium', 'score-low');
+                        scoreBar.classList.add(score >= 70 ? 'score-high' : score >= 50 ? 'score-medium' : 'score-low');
+                    }
+                    if (scoreText) {
+                        scoreText.textContent = score;
+                    }
+                }
                 
                 // ========== Xóa sạch Badge cũ, chỉ tạo MỘT badge duy nhất ==========
                 const statusCell = row.querySelector('.status-cell');
@@ -1298,7 +1346,11 @@ if (scoreCell) {
                 veto_reasons: row.dataset.vetoReasons || '',
                 is_veto_wg: row.dataset.isVeto === 'true',
                 t_score: parseInt(row.dataset.tScore) || 0,
-                f_score_calc: parseInt(row.dataset.fScoreCalc) || 0,
+                recommendation_label: row.dataset.recommendationLabel || '',
+                // Relative Strength & Sector
+                sector: row.dataset.sector || 'general',
+                rs_label: row.dataset.rsLabel || 'NEUTRAL',
+                rs_bonus: parseInt(row.dataset.rsBonus) || 0,
             };
             showModal(stockData);
         }
@@ -1330,316 +1382,391 @@ if (scoreCell) {
             });
         }
 
+        // Helper to safely get element by ID
+        function getEl(id) {
+            const el = document.getElementById(id);
+            if (!el) console.warn('Element not found:', id);
+            return el;
+        }
+
         function showModal(stockData) {
             // Populate modal header
-            document.getElementById('modalSymbol').textContent = stockData.symbol;
-            document.getElementById('modalCompany').textContent = stockData.company_name + ' | ' + stockData.industry + ' | ' + stockData.market_group;
-            document.getElementById('modalPrice').textContent = formatNumber(stockData.price, 1);
-            // 1. Đổ số vào 2 ô Daily/Weekly trong Modal
-document.getElementById('modalFVDaily').textContent = stockData.fv_daily > 0 ? formatNumber(stockData.fv_daily, 0) : 'N/A';
-document.getElementById('modalFVWeekly').textContent = stockData.fv_weekly > 0 ? formatNumber(stockData.fv_weekly, 0) : 'N/A';
+            const elSymbol = getEl('modalSymbol');
+            const elCompany = getEl('modalCompany');
+            const elPrice = getEl('modalPrice');
+            const elFVDaily = getEl('modalFVDaily');
+            const elFVWeekly = getEl('modalFVWeekly');
+            const elChange = getEl('modalChange');
+            const elScore = getEl('modalScore');
+            const elScoreDetail = getEl('modalScoreDetail');
+            const elTechScore = getEl('modalTechScore');
+            const elFundScore = getEl('modalFundScore');
+            const elSignal = getEl('modalSignal');
+            const elTrend = getEl('modalTrend');
+            const elCriteria = getEl('modalCriteria');
+            const elEntry = getEl('modalEntry');
+            const elSL = getEl('modalSL');
+            const elTP = getEl('modalTP');
+            const elRR = getEl('modalRR');
+            const elTimeframeLabel = getEl('modalTimeframeLabel');
+            const elEstDays = getEl('modalEstDays');
+            const elProfitPerDay = getEl('modalProfitPerDay');
+            const elUpsidePerDay = getEl('modalUpsidePerDay');
+            const elProfitPerDayContainer = getEl('modalProfitPerDayContainer');
+            const elUpsidePerDayContainer = getEl('modalUpsidePerDayContainer');
+            const elTargetPct = getEl('modalTargetPct');
+            const elEntryPrice = getEl('modalEntryPrice');
+            const elTargetPrice = getEl('modalTargetPrice');
+            const elProgressBar = getEl('modalProgressBar');
+            const elRSI = getEl('modalRSI');
+            const elADX = getEl('modalADX');
+            const elCMF = getEl('modalCMF');
+            const elMFI = getEl('modalMFI');
+            const elVWAP = getEl('modalVWAP');
+            const elIchimoku = getEl('modalIchimoku');
+            const elTenkan = getEl('modalTenkan');
+            const elKijun = getEl('modalKijun');
+            const elST = getEl('modalST');
+            const elSTValue = getEl('modalSTValue');
+            const elSMA10 = getEl('modalSMA10');
+            const elSMA20 = getEl('modalSMA20');
+            const elSMA50 = getEl('modalSMA50');
+            const elMACD = getEl('modalMACD');
+            const elMACDSignal = getEl('modalMACDSignal');
+            const elBBUpper = getEl('modalBBUpper');
+            const elBBLower = getEl('modalBBLower');
+            const elBBPercent = getEl('modalBBPercent');
+            const elFScore = getEl('modalFScore');
+            const elROE = getEl('modalROE');
+            const elPE = getEl('modalPE');
+            const elPB = getEl('modalPB');
+            const elProfitGrowth = getEl('modalProfitGrowth');
+            const elMarketRSI = getEl('modalMarketRSI');
+            const elMarketRisk = getEl('modalMarketRisk');
+            const elStockRisk = getEl('modalStockRisk');
+            const elRiskReason = getEl('modalRiskReason');
+            const elVetoSection = getEl('modalVetoSection');
+            const elVetoReason = getEl('modalVetoReason');
+            const elCriteriaList = getEl('modalCriteriaList');
+            const elBadges = getEl('modalBadges');
+            const elVerdict = getEl('modalVerdict');
+            const elValDot = getEl('modalValDot');
+            const elEarlyExitSection = getEl('modalEarlyExitSection');
+            const elEarlyExitDetail = getEl('modalEarlyExitDetail');
 
-// 2. Điều khiển chấm trắng trên thanh Gauge (Đắt/Rẻ)
-const price = stockData.price || 0;
-const fv = stockData.fv_weekly || 0;
-let gaugePos = 50; // Mặc định ở giữa
-if (fv > 0 && price > 0) {
-    gaugePos = (fv / price) * 50; 
-    gaugePos = Math.min(95, Math.max(5, gaugePos)); 
-}
-const valDot = document.getElementById('modalValDot');
-if (valDot) valDot.style.left = gaugePos + '%';
-            // Target Yield (thay vì change_percent)
-            const targetYield = stockData.target_yield_pct || 0;
-            document.getElementById('modalChange').textContent = (targetYield >= 0 ? '+' : '') + targetYield.toFixed(1) + '%';
-            document.getElementById('modalChange').className = 'change ' + (targetYield >= 0 ? 'positive' : 'negative');
+            if (elSymbol) elSymbol.textContent = stockData.symbol || '';
+            if (elCompany) elCompany.textContent = (stockData.company_name || '') + ' | ' + (stockData.industry || 'Other') + ' | ' + (stockData.market_group || 'MIDCAP');
+            if (elPrice) elPrice.textContent = formatNumber(stockData.price, 1);
+            if (elFVDaily) elFVDaily.textContent = stockData.fv_daily > 0 ? formatNumber(stockData.fv_daily, 0) : 'N/A';
+            if (elFVWeekly) elFVWeekly.textContent = stockData.fv_weekly > 0 ? formatNumber(stockData.fv_weekly, 0) : 'N/A';
 
-            // Scores
-            document.getElementById('modalScore').textContent = stockData.master_score + '/100';
-            
-            // Show score breakdown if market weight was applied
-            const scoreDetailEl = document.getElementById('modalScoreDetail');
-            if (stockData.base_score && stockData.market_weight !== 0) {
-                const weightSign = stockData.market_weight > 0 ? '+' : '';
-                const mktLabel = stockData.market_weight < 0 ? 'MKT Risk' : 'MKT Oversold';
-                scoreDetailEl.innerHTML = `<span style="color:#94a3b8;">Base: ${stockData.base_score}</span> <span style="color:#f59e0b;">(${weightSign}${stockData.market_weight} ${mktLabel})</span>`;
-            } else if (stockData.base_score && stockData.base_score !== stockData.master_score) {
-                scoreDetailEl.innerHTML = `<span style="color:#94a3b8;">Base: ${stockData.base_score}</span>`;
-            } else {
-                scoreDetailEl.innerHTML = '';
+            const price = stockData.price || 0;
+            const fv = stockData.fv_weekly || 0;
+            let gaugePos = 50;
+            if (fv > 0 && price > 0) {
+                gaugePos = Math.min(95, Math.max(5, (fv / price) * 50));
             }
-            
-            document.getElementById('modalTechScore').textContent = stockData.technical_score + '/100';
-            document.getElementById('modalFundScore').textContent = stockData.fundamental_score + '/100';
-            document.getElementById('modalSignal').textContent = stockData.signal;
-            document.getElementById('modalSignal').className = 'value ' + getSignalClass(stockData.signal);
-            document.getElementById('modalTrend').textContent = stockData.trend;
-            document.getElementById('modalCriteria').textContent = stockData.criteria_met + '/12';
+            if (elValDot) elValDot.style.left = gaugePos + '%';
 
-            // Trading Levels
-            document.getElementById('modalEntry').textContent = formatNumber(stockData.entry_price, 1);
-            document.getElementById('modalSL').textContent = formatNumber(stockData.stop_loss, 1);
-            document.getElementById('modalTP').textContent = formatNumber(stockData.take_profit, 1);
-            document.getElementById('modalRR').textContent = stockData.risk_reward_ratio.toFixed(2);
+            const targetYield = stockData.target_yield_pct || 0;
+            if (elChange) {
+                elChange.textContent = (targetYield >= 0 ? '+' : '') + targetYield.toFixed(1) + '%';
+                elChange.className = 'change ' + (targetYield >= 0 ? 'positive' : 'negative');
+            }
 
-            // Investment Horizon
-            const timeframeLabelEl = document.getElementById('modalTimeframeLabel');
-            const estDaysEl = document.getElementById('modalEstDays');
-            const profitPerDayEl = document.getElementById('modalProfitPerDay');
-            const upsidePerDayEl = document.getElementById('modalUpsidePerDay');
+            if (elScore) elScore.textContent = (stockData.master_score || 0) + '/100';
+            if (elScoreDetail) {
+                if (stockData.base_score && stockData.market_weight !== 0) {
+                    const weightSign = stockData.market_weight > 0 ? '+' : '';
+                    const mktLabel = stockData.market_weight < 0 ? 'MKT Risk' : 'MKT Oversold';
+                    elScoreDetail.innerHTML = `<span style="color:#94a3b8;">Base: ${stockData.base_score}</span> <span style="color:#f59e0b;">(${weightSign}${stockData.market_weight} ${mktLabel})</span>`;
+                } else if (stockData.base_score && stockData.base_score !== stockData.master_score) {
+                    elScoreDetail.innerHTML = `<span style="color:#94a3b8;">Base: ${stockData.base_score}</span>`;
+                } else {
+                    elScoreDetail.innerHTML = '';
+                }
+            }
+
+            if (elTechScore) elTechScore.textContent = (stockData.technical_score || 0) + '/100';
+            if (elFundScore) elFundScore.textContent = (stockData.fundamental_score || 0) + '/100';
+            if (elSignal) {
+                elSignal.textContent = stockData.recommendation_label || stockData.signal || 'WAIT';
+                elSignal.className = 'value ' + getSignalClass(stockData.signal);
+            }
+            if (elTrend) elTrend.textContent = stockData.trend || 'SIDEWAYS';
+            if (elCriteria) elCriteria.textContent = (stockData.criteria_met || 0) + '/12';
+
+            if (elEntry) elEntry.textContent = formatNumber(stockData.entry_price || 0, 1);
+            if (elSL) elSL.textContent = formatNumber(stockData.stop_loss || 0, 1);
+            if (elTP) elTP.textContent = formatNumber(stockData.take_profit || 0, 1);
+            if (elRR) elRR.textContent = (stockData.risk_reward_ratio || 0).toFixed(2);
 
             if (stockData.timeframe_label) {
-                timeframeLabelEl.textContent = stockData.timeframe_label;
-                timeframeLabelEl.className = 'value ' + (stockData.timeframe_color === 'emerald' ? 'positive' : stockData.timeframe_color === 'sky' ? '' : '');
-                timeframeLabelEl.style.color = stockData.timeframe_color === 'emerald' ? '#22c55e' : stockData.timeframe_color === 'sky' ? '#3b82f6' : '#f59e0b';
+                if (elTimeframeLabel) {
+                    elTimeframeLabel.textContent = stockData.timeframe_label;
+                    elTimeframeLabel.className = 'value';
+                    elTimeframeLabel.style.color = stockData.timeframe_color === 'emerald' ? '#22c55e' : stockData.timeframe_color === 'sky' ? '#3b82f6' : '#f59e0b';
+                }
             }
-            estDaysEl.textContent = stockData.estimated_days > 0 ? stockData.estimated_days.toFixed(1) + ' phiên' : 'N/A';
-            profitPerDayEl.textContent = stockData.expected_profit_per_day > 0 ? '+' + formatNumber(stockData.expected_profit_per_day, 0) + '/ngày' : 'N/A';
-            upsidePerDayEl.textContent = stockData.upside_per_day > 0 ? '+' + stockData.upside_per_day.toFixed(2) + '%' : 'N/A';
+            if (elEstDays) elEstDays.textContent = stockData.estimated_days > 0 ? stockData.estimated_days.toFixed(1) + ' phiên' : 'N/A';
+            
+            // Noise filter: hide profit_per_day if estimated_days < 3 (statistically insignificant)
+            const estDaysThreshold = 3;
+            if (elProfitPerDayContainer) elProfitPerDayContainer.style.display = stockData.estimated_days >= estDaysThreshold ? 'block' : 'none';
+            if (elUpsidePerDayContainer) elUpsidePerDayContainer.style.display = stockData.estimated_days >= estDaysThreshold ? 'block' : 'none';
+            if (elProfitPerDay) elProfitPerDay.textContent = stockData.expected_profit_per_day > 0 ? '+' + formatNumber(stockData.expected_profit_per_day, 0) + '/ngày' : 'N/A';
+            if (elUpsidePerDay) elUpsidePerDay.textContent = stockData.upside_per_day > 0 ? '+' + stockData.upside_per_day.toFixed(2) + '%' : 'N/A';
 
-            // 5% Progress Bar
-            const entryPrice = stockData.entry_price || stockData.price;
-            const targetPrice = entryPrice * 1.05; // Target = Entry + 5%
-            const currentPrice = stockData.price;
-            const targetYieldPct = stockData.target_yield_pct || 0;
-            
-            document.getElementById('modalTargetPct').textContent = '+' + targetYieldPct.toFixed(1) + '%';
-            document.getElementById('modalEntryPrice').textContent = formatNumber(entryPrice, 0);
-            document.getElementById('modalTargetPrice').textContent = formatNumber(targetPrice, 0);
-            document.getElementById('modalProgressText').textContent = 'Entry → Target';
-            
-            // Calculate progress (0-100%) based on target yield
-            const progressPct = Math.min(100, (targetYieldPct / 5) * 100);
-            document.getElementById('modalProgressBar').style.width = progressPct + '%';
-            
-            // Early Exit Sensor visibility
-            const earlyExitSection = document.getElementById('modalEarlyExitSection');
-            if (targetYieldPct >= 2) {
-                earlyExitSection.style.display = 'block';
-                const triggerPct = stockData.early_exit_trigger_pct || 2;
-                const dropPct = stockData.early_exit_drop_pct || 0.7;
-                document.getElementById('modalEarlyExitDetail').textContent = 
-                    'Lãi ≥' + triggerPct + '% → Sụt ' + dropPct + '% = Bán ngay';
-            } else {
-                earlyExitSection.style.display = 'none';
+            const entryPrice = stockData.entry_price || stockData.price || 0;
+            const takeProfitPrice = stockData.take_profit || entryPrice * 1.05;
+            if (elTargetPct) elTargetPct.textContent = '+' + targetYield.toFixed(1) + '%';
+            if (elEntryPrice) elEntryPrice.textContent = formatNumber(entryPrice, 0);
+            if (elTargetPrice) elTargetPrice.textContent = formatNumber(takeProfitPrice, 0) + ' (FV Weekly)';
+
+            let progressPct = 0;
+            const totalRange = takeProfitPrice - entryPrice;
+            if (totalRange > 0) {
+                progressPct = Math.min(100, ((price - entryPrice) / totalRange) * 100);
+            }
+            if (elProgressBar) elProgressBar.style.width = Math.max(0, Math.min(100, progressPct)) + '%';
+
+            if (elEarlyExitSection) {
+                if (targetYield >= 2) {
+                    elEarlyExitSection.style.display = 'block';
+                    const triggerPct = stockData.early_exit_trigger_pct || 2;
+                    const dropPct = stockData.early_exit_drop_pct || 0.7;
+                    if (elEarlyExitDetail) elEarlyExitDetail.textContent = 'Lãi ≥' + triggerPct + '% → Sụt ' + dropPct + '% = Bán ngay';
+                } else {
+                    elEarlyExitSection.style.display = 'none';
+                }
             }
 
-            // Technical Indicators
-            document.getElementById('modalRSI').textContent = stockData.rsi.toFixed(0);
-            document.getElementById('modalRSI').className = 'value ' + getRSIClass(stockData.rsi);
-            document.getElementById('modalADX').textContent = stockData.adx.toFixed(0);
-            document.getElementById('modalCMF').textContent = (stockData.cmf >= 0 ? '+' : '') + stockData.cmf.toFixed(3);
-            document.getElementById('modalCMF').className = 'value ' + (stockData.cmf >= 0 ? 'positive' : 'negative');
-            document.getElementById('modalMFI').textContent = stockData.mfi.toFixed(0);
-            document.getElementById('modalMFI').className = 'value ' + (stockData.mfi >= 50 ? 'positive' : 'negative');
+            if (elRSI) {
+                elRSI.textContent = (stockData.rsi || 50).toFixed(0);
+                elRSI.className = 'value ' + getRSIClass(stockData.rsi);
+            }
+            if (elADX) elADX.textContent = (stockData.adx || 0).toFixed(0);
+            if (elCMF) {
+                elCMF.textContent = (stockData.cmf >= 0 ? '+' : '') + (stockData.cmf || 0).toFixed(3);
+                elCMF.className = 'value ' + ((stockData.cmf || 0) >= 0 ? 'positive' : 'negative');
+            }
+            if (elMFI) {
+                elMFI.textContent = (stockData.mfi || 50).toFixed(0);
+                elMFI.className = 'value ' + ((stockData.mfi || 50) >= 50 ? 'positive' : 'negative');
+            }
 
-            // VWAP with distance
-            const vwapEl = document.getElementById('modalVWAP');
             if (stockData.vwap > 0) {
-                vwapEl.textContent = formatNumber(stockData.vwap, 1);
-                const distance = ((stockData.price - stockData.vwap) / stockData.vwap * 100).toFixed(2);
-                vwapEl.className = 'value ' + (Math.abs(distance) > 3 ? (distance > 0 ? 'positive' : 'negative') : 'neutral');
-            } else {
-                vwapEl.textContent = 'N/A';
-                vwapEl.className = 'value neutral';
+                if (elVWAP) elVWAP.textContent = formatNumber(stockData.vwap, 1);
+                const distance = ((price - stockData.vwap) / stockData.vwap * 100).toFixed(2);
+                if (elVWAP) elVWAP.className = 'value ' + (Math.abs(distance) > 3 ? (distance > 0 ? 'positive' : 'negative') : 'neutral');
+            } else if (elVWAP) {
+                elVWAP.textContent = 'N/A';
+                elVWAP.className = 'value neutral';
             }
 
-            // Ichimoku
-            document.getElementById('modalIchimoku').textContent = stockData.ichimoku_status.toUpperCase();
-            document.getElementById('modalIchimoku').className = 'value ' + (stockData.ichimoku_status === 'bullish' ? 'positive' : stockData.ichimoku_status === 'bearish' ? 'negative' : 'neutral');
-            document.getElementById('modalTenkan').textContent = stockData.ichimoku_tenkan > 0 ? formatNumber(stockData.ichimoku_tenkan, 1) : 'N/A';
-            document.getElementById('modalKijun').textContent = stockData.ichimoku_kijun > 0 ? formatNumber(stockData.ichimoku_kijun, 1) : 'N/A';
+            if (elIchimoku) {
+                elIchimoku.textContent = (stockData.ichimoku_status || 'neutral').toUpperCase();
+                elIchimoku.className = 'value ' + (stockData.ichimoku_status === 'bullish' ? 'positive' : stockData.ichimoku_status === 'bearish' ? 'negative' : 'neutral');
+            }
+            if (elTenkan) elTenkan.textContent = stockData.ichimoku_tenkan > 0 ? formatNumber(stockData.ichimoku_tenkan, 1) : 'N/A';
+            if (elKijun) elKijun.textContent = stockData.ichimoku_kijun > 0 ? formatNumber(stockData.ichimoku_kijun, 1) : 'N/A';
 
-            // SuperTrend
-            document.getElementById('modalST').textContent = stockData.supertrend_signal.toUpperCase();
-            document.getElementById('modalST').className = 'value ' + (stockData.supertrend_signal === 'buy' ? 'positive' : stockData.supertrend_signal === 'sell' ? 'negative' : 'neutral');
-            document.getElementById('modalSTValue').textContent = stockData.supertrend > 0 ? formatNumber(stockData.supertrend, 1) : 'N/A';
+            if (elST) {
+                elST.textContent = (stockData.supertrend_signal || 'neutral').toUpperCase();
+                elST.className = 'value ' + (stockData.supertrend_signal === 'buy' ? 'positive' : stockData.supertrend_signal === 'sell' ? 'negative' : 'neutral');
+            }
+            if (elSTValue) elSTValue.textContent = stockData.supertrend > 0 ? formatNumber(stockData.supertrend, 1) : 'N/A';
 
-            // Moving Averages
-            document.getElementById('modalSMA10').textContent = stockData.sma_10 > 0 ? formatNumber(stockData.sma_10, 1) : 'N/A';
-            document.getElementById('modalSMA20').textContent = stockData.sma_20 > 0 ? formatNumber(stockData.sma_20, 1) : 'N/A';
-            document.getElementById('modalSMA50').textContent = stockData.sma_50 > 0 ? formatNumber(stockData.sma_50, 1) : 'N/A';
+            if (elSMA10) elSMA10.textContent = stockData.sma_10 > 0 ? formatNumber(stockData.sma_10, 1) : 'N/A';
+            if (elSMA20) elSMA20.textContent = stockData.sma_20 > 0 ? formatNumber(stockData.sma_20, 1) : 'N/A';
+            if (elSMA50) elSMA50.textContent = stockData.sma_50 > 0 ? formatNumber(stockData.sma_50, 1) : 'N/A';
 
-            // Bollinger Bands
-            document.getElementById('modalBBUpper').textContent = stockData.bb_upper > 0 ? formatNumber(stockData.bb_upper, 1) : 'N/A';
-            document.getElementById('modalBBLower').textContent = stockData.bb_lower > 0 ? formatNumber(stockData.bb_lower, 1) : 'N/A';
-            document.getElementById('modalBBPercent').textContent = stockData.bb_percent.toFixed(0) + '%';
+            if (elBBUpper) elBBUpper.textContent = stockData.bb_upper > 0 ? formatNumber(stockData.bb_upper, 1) : 'N/A';
+            if (elBBLower) elBBLower.textContent = stockData.bb_lower > 0 ? formatNumber(stockData.bb_lower, 1) : 'N/A';
+            if (elBBPercent) elBBPercent.textContent = (stockData.bb_percent || 50).toFixed(0) + '%';
 
-            // MACD
-            document.getElementById('modalMACD').textContent = (stockData.macd >= 0 ? '+' : '') + stockData.macd.toFixed(2);
-            document.getElementById('modalMACD').className = 'value ' + (stockData.macd > 0 ? 'positive' : 'negative');
-            document.getElementById('modalMACDSignal').textContent = (stockData.macd_signal >= 0 ? '+' : '') + stockData.macd_signal.toFixed(2);
+            if (elMACD) {
+                elMACD.textContent = (stockData.macd >= 0 ? '+' : '') + (stockData.macd || 0).toFixed(2);
+                elMACD.className = 'value ' + ((stockData.macd || 0) > 0 ? 'positive' : 'negative');
+            }
+            if (elMACDSignal) elMACDSignal.textContent = (stockData.macd_signal >= 0 ? '+' : '') + (stockData.macd_signal || 0).toFixed(2);
 
-            // Fundamental
-            document.getElementById('modalFScore').textContent = stockData.f_score + '/9';
-            document.getElementById('modalFScore').className = 'value ' + (stockData.f_score >= 7 ? 'positive' : stockData.f_score >= 4 ? 'neutral' : 'negative');
-            document.getElementById('modalROE').textContent = stockData.roe ? stockData.roe.toFixed(1) + '%' : 'N/A';
-            document.getElementById('modalPE').textContent = stockData.pe ? stockData.pe.toFixed(1) : 'N/A';
-            document.getElementById('modalPB').textContent = stockData.pb ? stockData.pb.toFixed(2) : 'N/A';
-            // Profit Growth
-            const profitGrowthEl = document.getElementById('modalProfitGrowth');
-            if (stockData.profit_growth !== null && stockData.profit_growth !== undefined) {
-                const pg = stockData.profit_growth;
-                profitGrowthEl.textContent = (pg >= 0 ? '+' : '') + pg.toFixed(1) + '%';
-                profitGrowthEl.className = 'value ' + (pg >= 0 ? 'positive' : 'negative');
-            } else {
-                profitGrowthEl.textContent = 'N/A';
-                profitGrowthEl.className = 'value neutral';
+            if (elFScore) {
+                elFScore.textContent = (stockData.f_score || 0) + '/9';
+                elFScore.className = 'value ' + ((stockData.f_score || 0) >= 7 ? 'positive' : (stockData.f_score || 0) >= 4 ? '' : 'negative');
+            }
+            if (elROE) elROE.textContent = stockData.roe ? stockData.roe.toFixed(1) + '%' : 'N/A';
+            if (elPE) elPE.textContent = stockData.pe ? stockData.pe.toFixed(1) : 'N/A';
+            if (elPB) elPB.textContent = stockData.pb ? stockData.pb.toFixed(2) : 'N/A';
+            if (elProfitGrowth) {
+                if (stockData.profit_growth !== null && stockData.profit_growth !== undefined) {
+                    const pg = stockData.profit_growth;
+                    elProfitGrowth.textContent = (pg >= 0 ? '+' : '') + pg.toFixed(1) + '%';
+                    elProfitGrowth.className = 'value ' + (pg >= 0 ? 'positive' : 'negative');
+                } else {
+                    elProfitGrowth.textContent = 'N/A';
+                    elProfitGrowth.className = 'value neutral';
+                }
             }
 
-            // Market RSI
-            document.getElementById('modalMarketRSI').textContent = stockData.market_rsi.toFixed(0);
-
-            // Risk Assessment
-            const marketRiskEl = document.getElementById('modalMarketRisk');
-            if (stockData.is_market_high_risk) {
-                marketRiskEl.textContent = 'Danger 🚨';
-                marketRiskEl.className = 'value negative';
-            } else {
-                marketRiskEl.textContent = 'Safe ✅';
-                marketRiskEl.className = 'value positive';
-            }
-
-            const stockRiskEl = document.getElementById('modalStockRisk');
-            stockRiskEl.textContent = stockData.stock_risk_level || 'Medium';
-            if (stockData.stock_risk_level === 'High' || stockData.stock_risk_level === 'Medium') {
-                stockRiskEl.className = 'value negative';
-            } else {
-                stockRiskEl.className = 'value positive';
-            }
-            // Tìm trong hàm showModal của ông và dán thêm 3 dòng này:
-            document.getElementById('modalFVDaily').textContent = formatNumber(stockData.fv_daily, 0);
-            document.getElementById('modalFVWeekly').textContent = formatNumber(stockData.fv_weekly, 0);
-
-            // Cập nhật thanh Gauge (Thước đo)
-            const pos = Math.min(100, Math.max(0, (stockData.fv_weekly / stockData.price) * 50));
-            document.getElementById('modalValDot').style.left = pos + '%';
-
-            // Risk Reason
-            const riskReasonEl = document.getElementById('modalRiskReason');
-            let riskReasonText = '';
-            if (stockData.is_market_high_risk) {
-                riskReasonText += '⚠️ Thị trường chung đang quá mua (VNIndex RSI > 80). ';
-            }
-            riskReasonText += '📊 Stock Risk: ' + (stockData.stock_risk_level || 'Medium');
-            if (stockData.stock_risk_reason) {
-                riskReasonText += ' - ' + stockData.stock_risk_reason;
-            }
-            if (stockData.is_safe_entry) {
-                riskReasonText += ' | ✅ Vùng giá an toàn (SMA20 ±2%)';
-            } else {
-                riskReasonText += ' | ⚠️ Giá ngoài vùng an toàn';
-            }
-            if (stockData.has_high_resistance) {
-                riskReasonText += ' | ⚠️ Kháng cự mạnh (TP trên Bollinger Upper)';
-            }
-            riskReasonEl.textContent = riskReasonText;
+            // ========== SECTOR-SPECIFIC METRICS ==========
+            const sectorBadge = getEl('modalSectorBadge');
+            const sectorMetrics = getEl('modalSectorMetrics');
+            const sector = stockData.sector || getSectorCategory(stockData.industry);
             
-            // Trend Factor
-            if (typeof stockData.trend_factor === 'number' && stockData.trend_factor > 0) {
-                let tfLabel = 'Sideways';
-                if (stockData.trend_factor >= 0.8) tfLabel = 'Strong Trend';
-                else if (stockData.trend_factor <= 0.4) tfLabel = 'Weak';
-                riskReasonEl.innerHTML += `<br><span style="color:#60a5fa;">Trend Factor: ${stockData.trend_factor} (${tfLabel})</span>`;
+            // Helper to get sector category
+            function getSectorCategory(industry) {
+                if (!industry) return 'general';
+                const ind = industry.toLowerCase();
+                if (ind.includes('bank') || ind.includes('ngân hàng') || ind.includes('chứng khoán')) return 'banking';
+                if (ind.includes('bất động sản') || ind.includes('real estate') || ind.includes('xây dựng')) return 'real_estate';
+                if (ind.includes('thép') || ind.includes('steel') || ind.includes('điện') || ind.includes('power')) return 'manufacturing';
+                return 'general';
             }
-
-            // Show Wealth Guard Scores Section
-            const wgSection = document.getElementById('modalWGSection');
-            if (stockData.final_score !== undefined && stockData.final_score > 0) {
-                wgSection.style.display = 'block';
-                document.getElementById('modalFinalScore').textContent = stockData.final_score + '/100';
-                document.getElementById('modalFinalScore').className = 'value ' + 
-                    (stockData.final_score >= 70 ? 'positive' : stockData.final_score >= 50 ? '' : 'negative');
+            
+            if (sectorBadge) {
+                const sectorLabels = {
+                    'banking': '🏦 Banking',
+                    'real_estate': '🏗️ Real Estate',
+                    'manufacturing': '🏭 Manufacturing',
+                    'retail': '🛒 Retail',
+                    'general': '📊 General'
+                };
+                sectorBadge.textContent = sectorLabels[sector] || '';
+            }
+            
+            // Show/hide sector-specific metrics
+            if (sectorMetrics) {
+                const isBanking = sector === 'banking';
+                const isRealEstate = sector === 'real_estate';
+                const isManufacturing = sector === 'manufacturing';
                 
-                const groupColors = { 'GOLD': '#f59e0b', 'GUERRILLA': '#22c55e', 'RISK': '#94a3b8', 'VETO': '#ef4444' };
-                document.getElementById('modalFinalGroup').textContent = stockData.final_group;
-                document.getElementById('modalFinalGroup').style.color = groupColors[stockData.final_group] || '#94a3b8';
-                
-                document.getElementById('modalTScore').textContent = stockData.t_score + '/125';
-                document.getElementById('modalFScoreCalc').textContent = stockData.f_score_calc + '/100';
-            } else {
-                wgSection.style.display = 'none';
+                if (isBanking || isRealEstate || isManufacturing) {
+                    sectorMetrics.style.display = 'block';
+                    
+                    // Banking metrics
+                    const elNIM = getEl('modalNIM');
+                    const elNPL = getEl('modalNPL');
+                    const elCASA = getEl('modalCASA');
+                    if (elNIM) elNIM.textContent = stockData.nim ? stockData.nim.toFixed(2) + '%' : 'N/A';
+                    if (elNPL) {
+                        elNPL.textContent = stockData.npl ? stockData.npl.toFixed(2) + '%' : 'N/A';
+                        elNPL.className = 'value ' + ((stockData.npl || 0) > 3 ? 'negative' : 'positive');
+                    }
+                    if (elCASA) elCASA.textContent = stockData.casa ? stockData.casa.toFixed(1) + '%' : 'N/A';
+                    
+                    // Real Estate metrics
+                    const elDE = getEl('modalDE');
+                    const elInvDays = getEl('modalInventoryDays');
+                    if (elDE) {
+                        elDE.textContent = stockData.debt_equity ? stockData.debt_equity.toFixed(2) : 'N/A';
+                        elDE.className = 'value ' + ((stockData.debt_equity || 0) > 1.5 ? 'negative' : 'positive');
+                    }
+                    if (elInvDays) elInvDays.textContent = stockData.inventory_days ? stockData.inventory_days.toFixed(0) + 'd' : 'N/A';
+                    
+                    // Manufacturing metrics
+                    const elGM = getEl('modalGrossMargin');
+                    const elInvTurn = getEl('modalInvTurnover');
+                    if (elGM) elGM.textContent = stockData.gross_margin ? stockData.gross_margin.toFixed(1) + '%' : 'N/A';
+                    if (elInvTurn) elInvTurn.textContent = stockData.inventory_turnover ? stockData.inventory_turnover.toFixed(1) : 'N/A';
+                } else {
+                    sectorMetrics.style.display = 'none';
+                }
             }
 
-            // Show/Hide Wealth Guard VETO Section
-            const vetoSection = document.getElementById('modalVetoSection');
-            const vetoReasonsEl = document.getElementById('modalVetoReasons');
+            // ========== RELATIVE STRENGTH ==========
+            const elRSLabel = getEl('modalRSLabel');
+            const elIndustryPerf = getEl('modalIndustryPerf');
+            const elRSBonus = getEl('modalRSBonus');
             
-            if (stockData.is_veto_wg && stockData.veto_reasons) {
-                vetoSection.style.display = 'block';
-                // Format reasons as bullet list
-                const reasons = stockData.veto_reasons.split(';').map(r => r.trim()).filter(r => r);
-                vetoReasonsEl.innerHTML = '<strong>Lý do loại bỏ:</strong><br>• ' + reasons.join('<br>• ');
-            } else {
-                vetoSection.style.display = 'none';
+            if (elRSLabel) {
+                const rsLabel = stockData.rs_label || 'NEUTRAL';
+                elRSLabel.textContent = rsLabel;
+                const rsColors = { 'LEADER': 'positive', 'OUTPERFORM': 'positive', 'NEUTRAL': 'neutral', 'UNDERPERFORM': 'negative', 'LAGGARD': 'negative', 'VETO': 'negative' };
+                elRSLabel.className = 'value ' + (rsColors[rsLabel] || 'neutral');
+            }
+            if (elIndustryPerf) {
+                const indPerf = stockData.rs_industry_performance || stockData.industry_performance || 0;
+                elIndustryPerf.textContent = (indPerf >= 0 ? '+' : '') + indPerf.toFixed(1) + '%';
+                elIndustryPerf.className = 'value ' + (indPerf >= 0 ? 'positive' : 'negative');
+            }
+            if (elRSBonus) {
+                const rsBonus = stockData.rs_bonus || 0;
+                elRSBonus.textContent = (rsBonus >= 0 ? '+' : '') + rsBonus;
+                elRSBonus.className = 'value ' + (rsBonus >= 0 ? 'positive' : 'negative');
             }
 
-            // AI Verdict
-            const verdictEl = document.getElementById('modalVerdict');
-            verdictEl.innerHTML = generateAIVerdict(stockData);
+            if (elMarketRSI) elMarketRSI.textContent = (stockData.market_rsi || 50).toFixed(0);
 
-            // LÝ DO VETO - Hiện/Ẩn theo is_vetoed
-            const modalVetoSection = document.getElementById('modalVetoSection');
-            const modalVetoReason = document.getElementById('modalVetoReason');
-            if (stockData.is_vetoed) {
-                modalVetoSection.style.display = 'block';
-                modalVetoReason.innerHTML = stockData.veto_reason || 'Không xác định';
-            } else {
-                modalVetoSection.style.display = 'none';
+            if (elMarketRisk) {
+                if (stockData.is_market_high_risk) {
+                    elMarketRisk.textContent = 'Danger 🚨';
+                    elMarketRisk.className = 'value negative';
+                } else {
+                    elMarketRisk.textContent = 'Safe ✅';
+                    elMarketRisk.className = 'value positive';
+                }
             }
-
-            // Criteria List
-            const criteriaEl = document.getElementById('modalCriteriaList');
-            if (stockData.criteria_list && stockData.criteria_list.length > 0) {
-                criteriaEl.innerHTML = stockData.criteria_list.map(c => {
-                    const passed = c.includes('✓') || c.includes('PASS');
-                    return `<span class="criteria-item ${passed ? 'passed' : 'failed'}">${c}</span>`;
-                }).join('');
-            } else {
-                criteriaEl.innerHTML = '<span class="neutral">No criteria data</span>';
+            if (elStockRisk) {
+                elStockRisk.textContent = stockData.stock_risk_level || 'Medium';
+                elStockRisk.className = 'value ' + ((stockData.stock_risk_level === 'High' || stockData.stock_risk_level === 'Medium') ? 'negative' : 'positive');
             }
 
-            // Badges
-            const badgesContainer = document.getElementById('modalBadges');
-            badgesContainer.innerHTML = '';
-            
-            // Market Risk Badge
-            if (stockData.is_market_high_risk) {
-                badgesContainer.innerHTML += '<span class="badge badge-high-risk">Market: Danger 🚨</span>';
-            } else {
-                badgesContainer.innerHTML += '<span class="badge badge-buy">Market: Safe ✅</span>';
-            }
-            
-            // Stock Risk Badge
-            const riskColors = {
-                'Very Low': 'badge-buy',
-                'Low': 'badge-buy',
-                'Medium': 'badge-wait',
-                'High': 'badge-high-risk'
-            };
-            const riskColorClass = riskColors[stockData.stock_risk_level] || 'badge-wait';
-            badgesContainer.innerHTML += `<span class="badge ${riskColorClass}">Stock Risk: ${stockData.stock_risk_level}</span>`;
-            
-            // Veto Badge
-            if (stockData.is_vetoed) {
-                badgesContainer.innerHTML += '<span class="badge badge-veto">VETO: ' + stockData.veto_reason + '</span>';
-            }
-            // Fast Pick Badge
-            if (stockData.is_fast_pick) {
-                badgesContainer.innerHTML += '<span class="badge badge-fast">FAST PICK</span>';
-            }
-            // Criteria Badge
-            if (stockData.criteria_met >= 9) {
-                badgesContainer.innerHTML += '<span class="badge badge-qualified">EXCELLENT</span>';
-            } else if (stockData.criteria_met >= 7) {
-                badgesContainer.innerHTML += '<span class="badge badge-qualified">QUALIFIED</span>';
-            }
-            // Days Badge
-            if (stockData.estimated_days > 0) {
-                badgesContainer.innerHTML += '<span class="badge badge-buy">' + stockData.estimated_days.toFixed(0) + ' ngày</span>';
+            if (elRiskReason) {
+                let riskText = '';
+                if (stockData.is_market_high_risk) riskText += '⚠️ Thị trường chung đang quá mua (VNIndex RSI > 80). ';
+                riskText += '📊 Stock Risk: ' + (stockData.stock_risk_level || 'Medium');
+                if (stockData.stock_risk_reason) riskText += ' - ' + stockData.stock_risk_reason;
+                if (stockData.is_safe_entry) riskText += ' | ✅ Vùng giá an toàn (SMA20 ±2%)';
+                else riskText += ' | ⚠️ Giá ngoài vùng an toàn';
+                if (stockData.has_high_resistance) riskText += ' | ⚠️ Kháng cự mạnh (TP trên Bollinger Upper)';
+                elRiskReason.textContent = riskText;
+                if (stockData.trend_factor > 0) {
+                    let tfLabel = 'Sideways';
+                    if (stockData.trend_factor >= 0.8) tfLabel = 'Strong Trend';
+                    else if (stockData.trend_factor <= 0.4) tfLabel = 'Weak';
+                    elRiskReason.innerHTML += `<br><span style="color:#60a5fa;">Trend Factor: ${stockData.trend_factor} (${tfLabel})</span>`;
+                }
             }
 
-            // Show modal
+            if (elVetoSection) {
+                if (stockData.is_vetoed) {
+                    elVetoSection.style.display = 'block';
+                    if (elVetoReason) elVetoReason.innerHTML = stockData.veto_reason || 'Không xác định';
+                } else {
+                    elVetoSection.style.display = 'none';
+                }
+            }
+
+            if (elCriteriaList) {
+                if (stockData.criteria_list && stockData.criteria_list.length > 0) {
+                    elCriteriaList.innerHTML = stockData.criteria_list.map(c => {
+                        const passed = c.includes('✓') || c.includes('PASS');
+                        return `<span class="criteria-item ${passed ? 'passed' : 'failed'}">${c}</span>`;
+                    }).join('');
+                } else {
+                    elCriteriaList.innerHTML = '<span class="neutral">No criteria data</span>';
+                }
+            }
+
+            if (elBadges) {
+                elBadges.innerHTML = '';
+                if (stockData.is_market_high_risk) elBadges.innerHTML += '<span class="badge badge-high-risk">Market: Danger 🚨</span>';
+                else elBadges.innerHTML += '<span class="badge badge-buy">Market: Safe ✅</span>';
+
+                const riskColors = { 'Very Low': 'badge-buy', 'Low': 'badge-buy', 'Medium': 'badge-wait', 'High': 'badge-high-risk' };
+                const riskColorClass = riskColors[stockData.stock_risk_level] || 'badge-wait';
+                elBadges.innerHTML += `<span class="badge ${riskColorClass}">Stock Risk: ${stockData.stock_risk_level || 'Medium'}</span>`;
+
+                if (stockData.is_vetoed) elBadges.innerHTML += '<span class="badge badge-veto">VETO: ' + (stockData.veto_reason || '') + '</span>';
+                if (stockData.is_fast_pick) elBadges.innerHTML += '<span class="badge badge-fast">FAST PICK</span>';
+                if ((stockData.criteria_met || 0) >= 9) elBadges.innerHTML += '<span class="badge badge-qualified">EXCELLENT</span>';
+                else if ((stockData.criteria_met || 0) >= 7) elBadges.innerHTML += '<span class="badge badge-qualified">QUALIFIED</span>';
+                if (stockData.estimated_days > 0) elBadges.innerHTML += '<span class="badge badge-buy">' + stockData.estimated_days.toFixed(0) + ' ngày</span>';
+            }
+
+            if (elVerdict) elVerdict.innerHTML = generateAIVerdict(stockData);
+
             document.getElementById('stockModal').classList.add('active');
         }
 
@@ -1648,10 +1775,8 @@ if (valDot) valDot.style.left = gaugePos + '%';
             const fundRating = s.fundamental_score >= 70 ? 'Tốt' : s.fundamental_score >= 50 ? 'Trung bình' : 'Yếu';
             let verdict = `Kỹ thuật: ${techRating} (${s.technical_score}/100) | Tài chính: ${fundRating} (${s.fundamental_score}/100). `;
 
-            // Sử dụng veto_reasons từ Wealth Guard
-            if (s.is_veto_wg && s.veto_reasons) {
-                verdict += `🚫 CẢNH BÁO VETO: ${s.veto_reasons.replace(/;/g, ', ')}. `;
-            } else if (s.is_vetoed && s.veto_reason) {
+            // VETO reasons
+            if (s.is_vetoed && s.veto_reason) {
                 verdict += '🚫 CẢNH BÁO: ' + s.veto_reason + '. ';
             }
             if (s.is_fast_pick) {
@@ -1809,33 +1934,6 @@ if (valDot) valDot.style.left = gaugePos + '%';
                         <div class="label">Criteria Đạt</div>
                         <div class="value" id="modalCriteria">8/12</div>
                     </div>
-                    <div class="modal-item">
-                        <div class="label">Market RSI</div>
-                        <div class="value" id="modalMarketRSI">55</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Wealth Guard Scores -->
-            <div class="modal-section" id="modalWGSection" style="display: none;">
-                <h3>🛡️ Wealth Guard Analysis</h3>
-                <div class="modal-grid">
-                    <div class="modal-item">
-                        <div class="label">Final Score</div>
-                        <div class="value" id="modalFinalScore" style="font-size: 24px; font-weight: 700;">0</div>
-                    </div>
-                    <div class="modal-item">
-                        <div class="label">Nhóm Chiến Thuật</div>
-                        <div class="value" id="modalFinalGroup">-</div>
-                    </div>
-                    <div class="modal-item">
-                        <div class="label">Tech Score (tScore)</div>
-                        <div class="value" id="modalTScore">0</div>
-                    </div>
-                    <div class="modal-item">
-                        <div class="label">Fund Score (fScore)</div>
-                        <div class="value" id="modalFScoreCalc">0</div>
-                    </div>
                 </div>
             </div>
 
@@ -1853,20 +1951,6 @@ if (valDot) valDot.style.left = gaugePos + '%';
                     </div>
                 </div>
                 <div id="modalRiskReason" style="margin-top: 12px; padding: 10px; background: #0f172a; border-radius: 8px; font-size: 12px; color: #94a3b8;"></div>
-            </div>
-
-            <!-- Wealth Guard VETO Section -->
-            <div class="modal-section" id="modalVetoSection" style="display: none;">
-                <div style="background: linear-gradient(135deg, rgba(239,68,68,0.15) 0%, rgba(220,38,38,0.1) 100%); border: 2px solid #ef4444; border-radius: 12px; padding: 16px;">
-                    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
-                        <span style="font-size: 24px;">🚫</span>
-                        <div>
-                            <div style="color: #ef4444; font-size: 16px; font-weight: 700;">CỔ PHIẾU BỊ LOẠI (VETO)</div>
-                            <div style="color: #f87171; font-size: 12px;">Wealth Guard - Không đạt tiêu chí đầu tư</div>
-                        </div>
-                    </div>
-                    <div id="modalVetoReasons" style="color: #fca5a5; font-size: 13px; line-height: 1.6;"></div>
-                </div>
             </div>
 
             <!-- Criteria List -->
@@ -1917,20 +2001,20 @@ if (valDot) valDot.style.left = gaugePos + '%';
                         <div class="label">Est. Days</div>
                         <div class="value" id="modalEstDays">7.5</div>
                     </div>
-                    <div class="modal-item">
+                    <div class="modal-item" id="modalProfitPerDayContainer">
                         <div class="label">Lợi Nhuận Dự Kiến</div>
                         <div class="value positive" id="modalProfitPerDay">+850/ngày</div>
                     </div>
-                    <div class="modal-item">
+                    <div class="modal-item" id="modalUpsidePerDayContainer">
                         <div class="label">% Upside / Ngày</div>
                         <div class="value" id="modalUpsidePerDay">0.85%</div>
                     </div>
                 </div>
-                
-                <!-- 5% Progress Bar -->
+
+                <!-- Dynamic Progress Bar: Entry Price -> Take Profit (FV Weekly) -->
                 <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #334155;">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                        <span style="color: #f8fafc; font-size: 13px;">🎯 Target 5% Progress</span>
+                        <span style="color: #f8fafc; font-size: 13px;">🎯 Entry → Take Profit Progress</span>
                         <span id="modalTargetPct" style="color: #22c55e; font-weight: bold;">0%</span>
                     </div>
                     <div style="background: #0f172a; border-radius: 8px; height: 24px; overflow: hidden; position: relative;">
@@ -1939,10 +2023,10 @@ if (valDot) valDot.style.left = gaugePos + '%';
                     </div>
                     <div style="display: flex; justify-content: space-between; margin-top: 4px; font-size: 10px; color: #64748b;">
                         <span id="modalEntryPrice">Entry</span>
-                        <span id="modalTargetPrice">Target 5%</span>
+                        <span id="modalTargetPrice">Target (FV Weekly)</span>
                     </div>
                 </div>
-                
+
                 <!-- Early Exit Sensor -->
                 <div id="modalEarlyExitSection" style="margin-top: 12px; padding: 10px; background: #0f172a; border-radius: 8px; display: none;">
                     <div style="display: flex; align-items: center; gap: 8px;">
@@ -1953,7 +2037,7 @@ if (valDot) valDot.style.left = gaugePos + '%';
                         </div>
                     </div>
                 </div>
-                
+
                 <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #334155; font-size: 11px; color: #64748b;">
                     💡 Đưa trên biên động ATR trung bình 14 phiên
                 </div>
@@ -2061,7 +2145,7 @@ if (valDot) valDot.style.left = gaugePos + '%';
 
             <!-- Fundamental -->
             <div class="modal-section">
-                <h3>Sức Khỏe Tài Chính</h3>
+                <h3>Sức Khỏe Tài Chính <span id="modalSectorBadge" style="font-size: 11px; color: #64748b; font-weight: normal;"></span></h3>
                 <div class="modal-grid">
                     <div class="modal-item">
                         <div class="label">F-Score</div>
@@ -2082,6 +2166,62 @@ if (valDot) valDot.style.left = gaugePos + '%';
                     <div class="modal-item">
                         <div class="label">Tăng trưởng LN</div>
                         <div class="value" id="modalProfitGrowth">+15.2%</div>
+                    </div>
+                </div>
+                
+                <!-- Sector-Specific Metrics -->
+                <div class="modal-grid" id="modalSectorMetrics" style="margin-top: 12px; display: none;">
+                    <!-- Banking metrics: NIM, NPL, CASA -->
+                    <div class="modal-item sector-banking">
+                        <div class="label">NIM</div>
+                        <div class="value" id="modalNIM">N/A</div>
+                    </div>
+                    <div class="modal-item sector-banking">
+                        <div class="label">NPL</div>
+                        <div class="value" id="modalNPL">N/A</div>
+                    </div>
+                    <div class="modal-item sector-banking">
+                        <div class="label">CASA</div>
+                        <div class="value" id="modalCASA">N/A</div>
+                    </div>
+                    
+                    <!-- Real Estate metrics: D/E, Inventory -->
+                    <div class="modal-item sector-real-estate">
+                        <div class="label">D/E</div>
+                        <div class="value" id="modalDE">N/A</div>
+                    </div>
+                    <div class="modal-item sector-real-estate">
+                        <div class="label">Inventory Days</div>
+                        <div class="value" id="modalInventoryDays">N/A</div>
+                    </div>
+                    
+                    <!-- Manufacturing metrics: Gross Margin, Inventory Turnover -->
+                    <div class="modal-item sector-manufacturing">
+                        <div class="label">Gross Margin</div>
+                        <div class="value" id="modalGrossMargin">N/A</div>
+                    </div>
+                    <div class="modal-item sector-manufacturing">
+                        <div class="label">Inv. Turnover</div>
+                        <div class="value" id="modalInvTurnover">N/A</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Relative Strength -->
+            <div class="modal-section" id="modalRSSection">
+                <h3>Relative Strength</h3>
+                <div class="modal-grid">
+                    <div class="modal-item">
+                        <div class="label">RS Label</div>
+                        <div class="value" id="modalRSLabel">NEUTRAL</div>
+                    </div>
+                    <div class="modal-item">
+                        <div class="label">Industry Perf</div>
+                        <div class="value" id="modalIndustryPerf">0%</div>
+                    </div>
+                    <div class="modal-item">
+                        <div class="label">RS Bonus</div>
+                        <div class="value" id="modalRSBonus">0</div>
                     </div>
                 </div>
             </div>

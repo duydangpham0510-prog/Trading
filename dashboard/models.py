@@ -176,8 +176,12 @@ class StockAnalysis(models.Model):
     # Trading Levels
     entry_price = models.FloatField(default=0)
     stop_loss = models.FloatField(default=0)
+    trailing_sl = models.FloatField(default=0)  # Trailing Stop = Price * 0.95
     take_profit = models.FloatField(default=0)
     risk_reward_ratio = models.FloatField(default=0)
+    rr_quality = models.CharField(max_length=50, blank=True, default="")
+    rr_quality_detail = models.CharField(max_length=100, blank=True, default="")
+    rr_warning = models.CharField(max_length=100, blank=True, default="")
 
     # Status Flags
     is_vetoed = models.BooleanField(default=False)
@@ -234,12 +238,16 @@ class StockAnalysis(models.Model):
     # Criteria
     criteria_met = models.IntegerField(default=0)
     criteria_list = models.JSONField(default=list)
+    recommendation_label = models.CharField(max_length=50, default="")  # e.g. "BUY (GOLD)"
 
-    # Fair Value (v10)
+    # Fair Value (v10.3 - Dynamic Sector Valuation)
     fv_daily = models.FloatField(default=0)  # (VWAP * 0.4) + (SMA20 * 0.6)
     fv_weekly = models.FloatField(default=0)  # Intrinsic-based formula
     valuation_status = models.CharField(max_length=20, default="N/A")  # "Rẻ" or "Đắt"
     intrinsic_value = models.FloatField(default=0)  # Base intrinsic value
+    sector_median_pe = models.FloatField(default=0)  # Dynamic sector median P/E
+    valuation_source = models.CharField(max_length=10, default="static")  # "dynamic" or "static"
+    valuation_cap_applied = models.BooleanField(default=False)  # Wealth Guard Cap was applied
 
     # Trend
     trend = models.CharField(max_length=20, default="SIDEWAYS")
@@ -290,6 +298,27 @@ class SyncStatus(models.Model):
 
 
 # ============== QUARTERLY FINANCIAL DATA ==============
+
+class IndustryValuation(models.Model):
+    """Lưu trữ P/E và P/B Median theo ngành từ dữ liệu thị trường thực tế"""
+    name = models.CharField(max_length=50, unique=True)  # VD: "Banking", "Technology"
+    sector_code = models.CharField(max_length=20, blank=True, default="")  # ICB sector code
+    median_pe = models.FloatField(default=0)  # P/E median của ngành
+    median_pb = models.FloatField(default=0)  # P/B median của ngành
+    stock_count = models.IntegerField(default=0)  # Số mã trong ngành
+    market_cap_avg = models.FloatField(default=0)  # Vốn hóa TB (tỷ VND)
+    is_active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "industry_valuation"
+        verbose_name_plural = "Industry Valuations"
+        ordering = ['name']
+
+    def __str__(self):
+        return f"{self.name}: PE={self.median_pe:.1f}, PB={self.median_pb:.1f} ({self.stock_count} stocks)"
+
 
 class QuarterlyFinancial(models.Model):
     """Lưu trữ dữ liệu tài chính theo quý cho VETO chính xác"""
