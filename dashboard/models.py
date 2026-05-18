@@ -135,6 +135,11 @@ class StockData(models.Model):
     profit_growth = models.FloatField(null=True, blank=True)  # Tăng trưởng LN quý (%)
     profit_growth_note = models.CharField(max_length=20, default="N/A")  # YoY, QoQ_adj, TTM, NEW_LISTING
     is_new_listing = models.BooleanField(default=False)  # Cổ phiếu mới (< 2 quý)
+    
+    # Earning Guidance (Kế hoạch lợi nhuận năm)
+    annual_profit_plan = models.FloatField(null=True, blank=True)  # Kế hoạch LN năm (tỷ VND)
+    current_ytd_profit = models.FloatField(null=True, blank=True)  # LN YTD hiện tại (tỷ VND)
+    profit_plan_completion = models.FloatField(null=True, blank=True)  # Tỷ lệ hoàn thành kế hoạch (%)
 
     # Meta
     updated_at = models.DateTimeField(auto_now=True)
@@ -305,6 +310,7 @@ class IndustryValuation(models.Model):
     sector_code = models.CharField(max_length=20, blank=True, default="")  # ICB sector code
     median_pe = models.FloatField(default=0)  # P/E median của ngành
     median_pb = models.FloatField(default=0)  # P/B median của ngành
+    median_de = models.FloatField(default=0)  # D/E median của ngành (thêm mới)
     stock_count = models.IntegerField(default=0)  # Số mã trong ngành
     market_cap_avg = models.FloatField(default=0)  # Vốn hóa TB (tỷ VND)
     is_active = models.BooleanField(default=True)

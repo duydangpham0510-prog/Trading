@@ -236,8 +236,8 @@ def top_picks(request: HttpRequest) -> HttpResponse:
 
     if is_data_available:
         # Đọc từ Database - CỰC NHANH
-        top_picks = get_top_picks_from_db(limit=8)
-        all_stocks = get_top_picks_from_db(limit=15)
+        top_picks, top_picks_health = get_top_picks_from_db(limit=8)
+        all_stocks, all_stocks_health = get_top_picks_from_db(limit=15)
 
         # Thống kê
         from .models import StockAnalysis
@@ -250,7 +250,9 @@ def top_picks(request: HttpRequest) -> HttpResponse:
 
         context = {
             "top_picks": top_picks,
+            "top_picks_health": top_picks_health,
             "all_stocks": all_stocks,
+            "all_stocks_health": all_stocks_health,
             "scan_time": sync_status.get("completed_at", "")[:19] if sync_status.get("completed_at") else "N/A",  # pyright: ignore[reportOptionalMemberAccess]
             "market_rsi": market_rsi,
             "market_status": "SELL ZONE" if market_rsi > 70 else "NEUTRAL",
@@ -335,7 +337,7 @@ def scan_vn30_api(request: HttpRequest) -> HttpResponse:
 
     # GET: Lấy kết quả từ DB - CỰC NHANH
     sync_status = get_sync_status()
-    top_picks = get_top_picks_from_db(limit=5)
+    top_picks, top_picks_health = get_top_picks_from_db(limit=5)
 
     from .models import StockAnalysis
     total = StockAnalysis.objects.count()
@@ -349,6 +351,7 @@ def scan_vn30_api(request: HttpRequest) -> HttpResponse:
         "market_status": "SELL ZONE" if market_rsi > 70 else "NEUTRAL",
         "market_rsi": market_rsi,
         "top_picks": top_picks,
+        "portfolio_health": top_picks_health,
         "bullish_count": StockAnalysis.objects.filter(signal__in=["BUY", "STRONG_BUY"]).count(),
         "fast_count": fast,
         "vetoed_count": vetoed,

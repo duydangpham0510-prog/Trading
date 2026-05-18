@@ -846,6 +846,10 @@
                     data-pb="{{ stock.pb }}"
                     data-fscore="{{ stock.f_score }}"
                     data-profit-growth="{{ stock.profit_growth|default:'' }}"
+                    data-annual-plan="{{ stock.annual_profit_plan|default:'' }}"
+                    data-ytd-profit="{{ stock.current_ytd_profit|default:'' }}"
+                    data-plan-completion="{{ stock.profit_plan_completion|default:'' }}"
+                    data-plan-status="{{ stock.profit_plan_status|default:'' }}"
                     data-fv-daily="{{ stock.fv_daily|floatformat:0 }}"
                     data-fv-weekly="{{ stock.fv_weekly|floatformat:0 }}"
                     data-trend="{{ stock.trend }}"
@@ -1306,6 +1310,10 @@
                 pb: row.dataset.pb ? parseFloat(row.dataset.pb) : null,
                 f_score: parseInt(row.dataset.fscore) || 0,
                 profit_growth: row.dataset.profitGrowth ? parseFloat(row.dataset.profitGrowth) : null,
+                annual_profit_plan: row.dataset.annualPlan ? parseFloat(row.dataset.annualPlan) : null,
+                current_ytd_profit: row.dataset.ytdProfit ? parseFloat(row.dataset.ytdProfit) : null,
+                profit_plan_completion: row.dataset.planCompletion ? parseFloat(row.dataset.planCompletion) : null,
+                profit_plan_status: row.dataset.planStatus || null,
                 trend: row.dataset.trend || 'WAIT',
                 sma_10: parseFloat(row.dataset.sma10) || 0,
                 sma_20: parseFloat(row.dataset.sma20) || 0,
@@ -1606,6 +1614,36 @@
                 } else {
                     elProfitGrowth.textContent = 'N/A';
                     elProfitGrowth.className = 'value neutral';
+                }
+            }
+
+            // ========== EARNING GUIDANCE ==========
+            const elPlanCompletion = getEl('modalPlanCompletion');
+            const elPlanStatus = getEl('modalPlanStatus');
+            const elPlanBadge = getEl('modalPlanBadge');
+            
+            if (elPlanCompletion) {
+                const completion = stockData.profit_plan_completion;
+                if (completion !== null && completion !== undefined) {
+                    elPlanCompletion.textContent = completion.toFixed(1) + '%';
+                    elPlanCompletion.className = 'value ' + (completion >= 50 ? 'positive' : (completion >= 25 ? 'neutral' : 'negative'));
+                } else {
+                    elPlanCompletion.textContent = 'N/A';
+                    elPlanCompletion.className = 'value neutral';
+                }
+            }
+            
+            if (elPlanStatus) {
+                const status = stockData.profit_plan_status || 'N/A';
+                elPlanStatus.textContent = status;
+                if (status === 'ON_TRACK') {
+                    elPlanStatus.className = 'badge positive';
+                } else if (status === 'BEHIND') {
+                    elPlanStatus.className = 'badge negative';
+                } else if (status === 'SLIGHTLY_BEHIND') {
+                    elPlanStatus.className = 'badge neutral';
+                } else {
+                    elPlanStatus.className = 'badge';
                 }
             }
 
@@ -2166,6 +2204,26 @@
                     <div class="modal-item">
                         <div class="label">Tăng trưởng LN</div>
                         <div class="value" id="modalProfitGrowth">+15.2%</div>
+                    </div>
+                </div>
+                
+                <!-- Earning Guidance (Kế hoạch lợi nhuận năm) -->
+                <div class="modal-grid" id="modalPlanSection" style="margin-top: 12px; display: none;">
+                    <div class="modal-item">
+                        <div class="label">Kế hoạch năm</div>
+                        <div class="value" id="modalAnnualPlan">N/A</div>
+                    </div>
+                    <div class="modal-item">
+                        <div class="label">LN YTD</div>
+                        <div class="value" id="modalYTDProfit">N/A</div>
+                    </div>
+                    <div class="modal-item">
+                        <div class="label">Hoàn thành KH</div>
+                        <div class="value" id="modalPlanCompletion">N/A</div>
+                    </div>
+                    <div class="modal-item">
+                        <div class="label">Trạng thái</div>
+                        <div class="value badge" id="modalPlanStatus">N/A</div>
                     </div>
                 </div>
                 

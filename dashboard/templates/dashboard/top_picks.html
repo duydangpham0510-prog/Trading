@@ -90,6 +90,31 @@
             border: 2px solid #ef4444;
         }
 
+        .sector-concentration-banner {
+            background: linear-gradient(135deg, #7f1d1d 0%, #991b1b 100%);
+            border: 2px solid #ef4444;
+            animation: pulse-banner 2s infinite;
+        }
+        
+        .sector-warning-banner {
+            background: linear-gradient(135deg, #713f12 0%, #92400e 100%);
+            border: 2px solid #f59e0b;
+        }
+        
+        .suggestion-tag {
+            background: rgba(251, 191, 36, 0.2);
+            color: #fbbf24;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        
+        @keyframes pulse-banner {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.85; }
+        }
+
         .conflict-banner {
             background: linear-gradient(135deg, #713f12 0%, #92400e 100%);
             border: 2px solid #f59e0b;
@@ -516,6 +541,30 @@
     <div class="banner market-warning-banner">
         <span class="icon">⚠️</span>
         <span class="message">{{ market_warning_message }}</span>
+    </div>
+    {% endif %}
+
+    {# Sector Concentration Warning #}
+    {% if top_picks_health.risk_level == 'HIGH' %}
+    <div class="banner sector-concentration-banner">
+        <span class="icon">🏦</span>
+        <span class="message">
+            {{ top_picks_health.risk_message }}
+            {% if top_picks_health.suggested_sectors %}
+            <span style="margin-left: 12px;">💡 Gợi ý đa dạng hóa: 
+                {% for sector in top_picks_health.suggested_sectors %}
+                <span class="suggestion-tag">{{ sector }}</span>{% if not forloop.last %}, {% endif %}
+                {% endfor %}
+            </span>
+            {% endif %}
+        </span>
+    </div>
+    {% elif top_picks_health.risk_level == 'MEDIUM' %}
+    <div class="banner sector-warning-banner">
+        <span class="icon">📊</span>
+        <span class="message">
+            Lưu ý: Danh mục có {{ top_picks_health.concentration_pct }}% tập trung vào nhóm {{ top_picks_health.concentrated_sector }}.
+        </span>
     </div>
     {% endif %}
 

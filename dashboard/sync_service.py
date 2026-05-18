@@ -1012,11 +1012,28 @@ def get_sector_category(industry: str) -> str:
     return 'general'
 
 
-def score_banking_sector(raw_data: Dict[str, Any]) -> Dict[str, Any]:
+def score_banking_sector(raw_data: Dict[str, Any], symbol: str = "") -> Dict[str, Any]:
     """
     Score banking sector stocks using P/B, NIM, NPL, CASA metrics.
     Banking uses P/B instead of P/E for valuation.
+    
+    ROBUST FALLBACK: If essential banking metrics (NIM/NPL) are missing,
+    automatically falls back to general scoring to avoid 0-score errors.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # ROBUST FALLBACK: Check for essential banking data
+    has_nim = raw_data.get('nim') or raw_data.get('net_interest_margin')
+    has_npl = raw_data.get('npl') or raw_data.get('npl_ratio')
+    
+    if not (has_nim or has_npl):
+        logger.warning(f"[Data Warning] Missing sector metrics for {symbol or 'Unknown'}, falling back to General Score")
+        result = score_general_sector(raw_data)
+        result['fallback'] = True
+        result['fallback_reason'] = 'Missing banking metrics (NIM/NPL)'
+        return result
+    
     result = {
         'fund_score': 0,
         'primary_metric': 'P/B',
@@ -1101,18 +1118,34 @@ def score_banking_sector(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def score_real_estate_sector(raw_data: Dict[str, Any]) -> Dict[str, Any]:
+def score_real_estate_sector(raw_data: Dict[str, Any], symbol: str = "") -> Dict[str, Any]:
     """
     Score real estate sector stocks using D/E, Inventory status, and land bank.
+    
+    ROBUST FALLBACK: If essential RE data (D/E) is missing,
+    automatically falls back to general scoring.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # ROBUST FALLBACK: Check for essential RE data
+    has_de = raw_data.get('debt_equity') or raw_data.get('de')
+    
+    if not has_de:
+        logger.warning(f"[Data Warning] Missing RE metrics for {symbol or 'Unknown'}, falling back to General Score")
+        result = score_general_sector(raw_data)
+        result['fallback'] = True
+        result['fallback_reason'] = 'Missing RE metrics (D/E)'
+        return result
+    
     result = {
         'fund_score': 0,
         'primary_metric': 'D/E',
-        'primary_value': raw_data.get('debt_equity') or raw_data.get('de'),
+        'primary_value': has_de,
         'sector_metrics': {}
     }
     
-    de = raw_data.get('debt_equity') or raw_data.get('de') or 0
+    de = has_de
     roe = raw_data.get('roe')
     pb = raw_data.get('pb')
     
@@ -1173,11 +1206,27 @@ def score_real_estate_sector(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def score_manufacturing_sector(raw_data: Dict[str, Any]) -> Dict[str, Any]:
+def score_manufacturing_sector(raw_data: Dict[str, Any], symbol: str = "") -> Dict[str, Any]:
     """
     Score manufacturing sector stocks using Gross Margin, Inventory Turnover.
     Lower ROE threshold (10%) for capital-intensive sectors.
+    
+    ROBUST FALLBACK: If essential manufacturing data (Gross Margin) is missing,
+    automatically falls back to general scoring.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # ROBUST FALLBACK: Check for essential manufacturing data
+    has_gm = raw_data.get('gross_margin')
+    
+    if not has_gm:
+        logger.warning(f"[Data Warning] Missing manufacturing metrics for {symbol or 'Unknown'}, falling back to General Score")
+        result = score_general_sector(raw_data)
+        result['fallback'] = True
+        result['fallback_reason'] = 'Missing manufacturing metrics (Gross Margin)'
+        return result
+    
     result = {
         'fund_score': 0,
         'primary_metric': 'Gross Margin',
@@ -1240,11 +1289,27 @@ def score_manufacturing_sector(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def score_retail_sector(raw_data: Dict[str, Any]) -> Dict[str, Any]:
+def score_retail_sector(raw_data: Dict[str, Any], symbol: str = "") -> Dict[str, Any]:
     """
     Score retail/consumer sector stocks.
     Focus on P/E, Revenue Growth, ROE.
+    
+    ROBUST FALLBACK: If essential retail data (P/E) is missing,
+    automatically falls back to general scoring.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # ROBUST FALLBACK: Check for essential retail data
+    has_pe = raw_data.get('pe')
+    
+    if not has_pe:
+        logger.warning(f"[Data Warning] Missing retail metrics for {symbol or 'Unknown'}, falling back to General Score")
+        result = score_general_sector(raw_data)
+        result['fallback'] = True
+        result['fallback_reason'] = 'Missing retail metrics (P/E)'
+        return result
+    
     result = {
         'fund_score': 0,
         'primary_metric': 'P/E',
@@ -1361,23 +1426,54 @@ def score_general_sector(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def score_by_sector(raw_data: Dict[str, Any], industry: str = "") -> Dict[str, Any]:
+def score_by_sector(raw_data: Dict[str, Any], industry: str = "", symbol: str = "") -> Dict[str, Any]:
     """
     Main entry point for sector-specific scoring.
     Routes to appropriate scoring function based on industry.
+    
+    Args:
+        raw_data: Dict containing financial metrics
+        industry: Industry name for sector classification
+        symbol: Stock symbol for logging purposes
     """
     sector = get_sector_category(industry)
-    
+
     if sector == 'banking':
-        return score_banking_sector(raw_data)
+        return score_banking_sector(raw_data, symbol)
     elif sector == 'real_estate':
-        return score_real_estate_sector(raw_data)
+        return score_real_estate_sector(raw_data, symbol)
     elif sector == 'manufacturing':
-        return score_manufacturing_sector(raw_data)
+        return score_manufacturing_sector(raw_data, symbol)
     elif sector == 'retail':
-        return score_retail_sector(raw_data)
+        return score_retail_sector(raw_data, symbol)
     else:
         return score_general_sector(raw_data)
+
+
+def get_sector_median_de(industry: str = "") -> float:
+    """
+    Get sector median Debt/Equity ratio from IndustryValuation model.
+    Used for RELATIVE VETO logic for Real Estate.
+    
+    Returns:
+        float: Sector median D/E ratio (default 1.0 if not found)
+    """
+    try:
+        from dashboard.models import IndustryValuation
+        # Try to find Real Estate industry valuation
+        industry_key = "Real Estate"
+        iv = IndustryValuation.objects.filter(
+            name__icontains=industry_key,
+            is_active=True
+        ).first()
+        
+        if iv and hasattr(iv, 'median_de') and iv.median_de and iv.median_de > 0:
+            return float(iv.median_de)
+    except Exception:
+        pass
+    
+    # Fallback: Return typical RE median DE for Vietnam market
+    return 1.0  # Vietnam RE typically has DE around 1.0-1.5
 
 
 # ============== HEALTH VETO CHECK (13 RULES) ==============
@@ -1454,11 +1550,24 @@ def check_health_veto(
 
     # ===== NHÓM 3: SỨC KHỎE TÀI CHÍNH (5 rules) =====
 
-    # VETO_14: D/E > 1.5 (Non-Financial sectors only)
+    # VETO_14: RELATIVE VETO for Real Estate (D/E vs Sector Median)
+    # A RE stock is only VETOED if D/E > 20% higher than Sector Median
+    # This accounts for the high-leverage nature of Vietnam RE market
+    if sector == 'real_estate':
+        de = fund_data.get('debt_equity') or fund_data.get('de') or 0
+        if de > 0:
+            # Get sector median DE from IndustryValuation model
+            sector_median_de = get_sector_median_de(industry)
+            # VETO if stock DE > sector_median * 1.2 (20% higher than median)
+            relative_threshold = sector_median_de * 1.2
+            if de > relative_threshold:
+                veto_reasons.append(f"VETO_14: RE D/E > {relative_threshold:.2f} (sector median: {sector_median_de:.2f})")
+    
+    # VETO_15: D/E > 1.5 (Non-Banking, Non-RE sectors)
     elif sector != 'banking':
         de = fund_data.get('debt_equity') or fund_data.get('de') or 0
         if de > 1.5:
-            veto_reasons.append(f"VETO_14: D/E > 1.5 ({de:.2f})")
+            veto_reasons.append(f"VETO_15: D/E > 1.5 ({de:.2f})")
 
     # VETO_15: NPL > 3% (Banking only)
     elif sector == 'banking':
@@ -1847,6 +1956,40 @@ def compute_core_logic(
             fund_score = min(100, fund_score + 8)
         # NOTE: VETO cho profit_growth < 0 đã được xử lý ở trên (Veto 11)
     
+    # ========== EARNING GUIDANCE (profit_plan_completion) ==========
+    # Check if company is on track with annual profit plan
+    # completion_rate = current_ytd_profit / annual_plan
+    # expected_progress = current_quarter * 0.25 (25% per quarter)
+    # Penalty if completion < 80% of expected progress
+    plan_penalty = 0
+    plan_completion_pct = None
+    plan_status = "N/A"
+    
+    annual_plan = fund_data.get('annual_profit_plan')
+    current_ytd = fund_data.get('current_ytd_profit')
+    
+    if annual_plan and current_ytd and annual_plan > 0:
+        plan_completion_pct = (current_ytd / annual_plan) * 100
+        
+        # Calculate expected progress based on current quarter
+        from datetime import datetime
+        now = datetime.now()
+        current_month = now.month
+        current_quarter = (current_month - 1) // 3 + 1
+        expected_progress_pct = current_quarter * 25  # 25%, 50%, 75%, 100%
+        
+        # Check if on track: completion_rate should be >= 80% of expected
+        min_required_pct = expected_progress_pct * 0.8
+        
+        if plan_completion_pct < min_required_pct:
+            plan_penalty = -20
+            plan_status = "BEHIND"
+        elif plan_completion_pct >= expected_progress_pct:
+            plan_status = "ON_TRACK"
+            fund_score = min(100, fund_score + 5)  # Bonus for meeting/exceeding plan
+        else:
+            plan_status = "SLIGHTLY_BEHIND"
+    
     # SMART MONEY & INDUSTRY BONUS
     foreign_streak = fund_data.get('foreign_buy_streak', 0)
     foreign_bonus = 0
@@ -1946,7 +2089,7 @@ def compute_core_logic(
         rs_bonus = -5
         rs_label = "UNDERPERFORM"
     
-    # Master Score = 70% Technical + 30% Fundamental + RS Bonus (per spec v3)
+    # Master Score = 70% Technical + 30% Fundamental + RS Bonus + Plan Penalty (per spec v4)
     base_master_score = int(tech_score * 0.7 + fund_score * 0.3)
     
     # VETO: Set master_score = 10 (strict per spec)
@@ -1956,7 +2099,9 @@ def compute_core_logic(
         rs_bonus = 0  # No RS bonus for vetoed stocks
         rs_label = "VETO"
     else:
-        master_score = max(0, min(100, base_master_score + market_weight + rs_bonus))
+        # Apply plan penalty
+        final_master_score = base_master_score + market_weight + rs_bonus + plan_penalty
+        master_score = max(0, min(100, final_master_score))
     
     # Store RS info for UI
     rs_info = {
@@ -2058,7 +2203,11 @@ def compute_core_logic(
         strategy_group = "GUERRILLA"
     else:
         strategy_group = "RISK"
-
+    
+    # EARNING GUIDANCE: Downgrade from GOLD to WATCH if plan is behind
+    if plan_status == "BEHIND" and strategy_group == "GOLD":
+        strategy_group = "WATCH"
+    
     recommendation_label = f"{signal} ({strategy_group})"
 
     # ===== UPDATE EST. DAYS & TARGET YIELD =====
@@ -2202,6 +2351,13 @@ def compute_core_logic(
         "pb": fund_data.get('pb'),
         "f_score": f_score_val,
         "f_score_grade": get_f_score_grade(f_score_val),
+        "profit_growth": profit_growth,
+        # Earning Guidance
+        "annual_profit_plan": annual_plan,
+        "current_ytd_profit": current_ytd,
+        "profit_plan_completion": plan_completion_pct,
+        "profit_plan_status": plan_status,
+        "plan_penalty_applied": plan_penalty,
         "profit_growth": fund_data.get('profit_growth'),
         "profit_growth_note": fund_data.get('profit_growth_note', 'N/A'),
         "is_new_listing": fund_data.get('is_new_listing', False),
@@ -2966,11 +3122,20 @@ def save_results_to_db(results: List[Dict[str, Any]]) -> int:
 
 
 def get_top_picks_from_db(limit: int = 5) -> List[Dict[str, Any]]:
-    """Lấy top picks từ Database - SORTED by Profit/Day for best efficiency"""
+    """Lấy top picks từ Database - SECTOR DIVERSIFIED for Portfolio Shield
+    
+    Logic:
+    1. Fetch a larger pool (limit * 3) of non-vetoed stocks
+    2. Apply sector cap: max 3 stocks per industry
+    3. Calculate portfolio_health for concentration warning
+    4. Return both picks and portfolio metadata
+    """
     from django.db.models import F, ExpressionWrapper, FloatField  # pyright: ignore[reportMissingImports]
-
-    # Get non-vetoed stocks, calculate profit_per_day and sort by it
-    # Profit/Day = (take_profit - entry_price) / estimated_days_to_target / entry_price * 100
+    
+    # Portfolio Shield: Max stocks per sector
+    MAX_STOCKS_PER_SECTOR = 3
+    
+    # Step A: Fetch broader pool (3x the limit)
     analyses = StockAnalysis.objects.select_related("symbol").filter(
         is_vetoed=False,
         estimated_days_to_target__gt=0
@@ -2982,19 +3147,44 @@ def get_top_picks_from_db(limit: int = 5) -> List[Dict[str, Any]]:
     ).order_by(
         '-profit_per_day_calc',
         '-master_score'
-    )[:limit]
-
-    picks = []
+    )[:limit * 3]
+    
+    # Step B: Build diversified picks with sector cap
+    diversified_picks = []
+    sector_counts = {}  # {industry: count}
+    
     for a in analyses:
+        # Get industry - use get_industry() method for actual industry name
+        s = a.symbol
+        industry = s.get_industry() if hasattr(s, 'get_industry') else (getattr(s, 'industry', 'Unknown') or 'Unknown')
+        
+        # Check sector cap
+        current_count = sector_counts.get(industry, 0)
+        if current_count < MAX_STOCKS_PER_SECTOR:
+            # Add to diversified picks
+            diversified_picks.append(a)
+            sector_counts[industry] = current_count + 1
+        
+        # Stop when we have enough
+        if len(diversified_picks) >= limit:
+            break
+    
+    # Step C: Build output list
+    picks = []
+    for a in diversified_picks:
         s = a.symbol
         # Use target_yield_pct from DB if available, otherwise calculate
         target_yield_pct = a.target_yield_pct if a.target_yield_pct else round((a.take_profit - (a.entry_price or s.price)) / (a.entry_price or s.price) * 100, 2) if a.take_profit and (a.entry_price or s.price) > 0 else 0
         days = a.estimated_days_to_target or 1
         profit_per_day = round(target_yield_pct / days, 2) if days > 0 else 0
         
+        # Get industry using get_industry() method
+        industry = s.get_industry() if hasattr(s, 'get_industry') else (getattr(s, 'industry', 'Unknown') or 'Unknown')
+        
         picks.append({
             "symbol": s.symbol,
             "company_name": s.company_name,
+            "industry": industry,
             "price": s.price,
             "change_percent": s.change_percent,
             # Target Yield
@@ -3031,6 +3221,11 @@ def get_top_picks_from_db(limit: int = 5) -> List[Dict[str, Any]]:
             # Meta
             "market_rsi": a.market_rsi,
             "profit_growth": getattr(s, 'profit_growth', None),
+            # Earning Guidance
+            "annual_profit_plan": getattr(s, 'annual_profit_plan', None),
+            "current_ytd_profit": getattr(s, 'current_ytd_profit', None),
+            "profit_plan_completion": getattr(s, 'profit_plan_completion', None),
+            "profit_plan_status": getattr(s, 'profit_plan_status', None),
             # Extra for criteria check
             "plus_di": s.plus_di,
             "minus_di": s.minus_di,
@@ -3039,7 +3234,92 @@ def get_top_picks_from_db(limit: int = 5) -> List[Dict[str, Any]]:
             "sma_20": s.sma_20,
         })
 
-    return picks
+    # Step D: Calculate Portfolio Health (Sector Concentration)
+    portfolio_health = calculate_portfolio_health(sector_counts, len(picks))
+    
+    return picks, portfolio_health
+
+
+def calculate_portfolio_health(sector_counts: Dict[str, int], total_picks: int) -> Dict[str, Any]:
+    """
+    Calculate portfolio health based on sector concentration.
+    
+    Args:
+        sector_counts: Dict of {industry: count}
+        total_picks: Total number of picks
+        
+    Returns:
+        Dict with risk_level, risk_message, and suggested_sectors
+    """
+    # Low correlation mapping (Vietnam market)
+    LOW_CORRELATION_MAP = {
+        "Banking": ["Retail", "Technology", "Utilities", "FMCG"],
+        "Real Estate": ["Technology", "Utilities", "Fishery", "Textile"],
+        "Securities": ["Healthcare", "Agriculture", "Technology"],
+        "Steel": ["Consumer Services", "Healthcare", "FMCG"],
+        "Manufacturing": ["Retail", "Technology", "Utilities"],
+        "Oil & Gas": ["Utilities", "Technology", "Healthcare"],
+        "Retail": ["Banking", "Technology", "Healthcare"],
+        "Technology": ["Banking", "Real Estate", "Utilities"],
+        "Utilities": ["Technology", "Retail", "Banking"],
+        "FMCG": ["Banking", "Technology", "Healthcare"],
+        "Conglomerate": ["Technology", "Healthcare", "Utilities"],
+        "Other": ["Technology", "Healthcare", "Retail"],
+    }
+    
+    # Concentration threshold (40%)
+    CONCENTRATION_THRESHOLD = 0.40
+    
+    if total_picks == 0:
+        return {
+            "risk_level": "LOW",
+            "risk_message": "",
+            "concentrated_sector": None,
+            "concentration_pct": 0,
+            "sector_distribution": {},
+            "suggested_sectors": []
+        }
+    
+    # Find max concentration
+    max_sector = max(sector_counts.items(), key=lambda x: x[1])
+    concentrated_sector = max_sector[0]
+    max_count = max_sector[1]
+    concentration_pct = max_count / total_picks
+    
+    # Check if concentration exceeds threshold
+    is_high_concentration = concentration_pct > CONCENTRATION_THRESHOLD
+    
+    # Get low-correlation suggestions
+    suggestions = LOW_CORRELATION_MAP.get(concentrated_sector, [])
+    
+    # Get sectors not currently in picks
+    current_sectors = set(sector_counts.keys())
+    suggested_sectors = [s for s in suggestions if s not in current_sectors][:3]
+    
+    # Determine risk level
+    if concentration_pct > 0.6:  # >60% concentration
+        risk_level = "HIGH"
+    elif concentration_pct > CONCENTRATION_THRESHOLD:  # >40%
+        risk_level = "MEDIUM"
+    else:
+        risk_level = "LOW"
+    
+    # Generate message
+    if is_high_concentration:
+        risk_message = f"Cảnh báo: Danh mục tập trung {int(concentration_pct * 100)}% vào nhóm {concentrated_sector}. Rủi ro hệ thống tăng cao."
+    else:
+        risk_message = ""
+    
+    return {
+        "risk_level": risk_level,
+        "risk_message": risk_message,
+        "concentrated_sector": concentrated_sector if is_high_concentration else None,
+        "concentration_pct": round(concentration_pct * 100, 1),
+        "sector_distribution": sector_counts,
+        "suggested_sectors": suggested_sectors,
+        "total_picks": total_picks,
+        "max_per_sector": max_count
+    }
 
 
 def get_sync_status() -> Optional[Dict[str, Any]]:
