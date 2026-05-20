@@ -270,8 +270,140 @@ def get_target_valuation(industry_name: str) -> Dict:
 # ============== CONSTANTS ==============
 MAX_WORKERS = 8
 UNIVERSE_SIZE = 100
-MIN_LIQUIDITY_BILLION = 10  # Giảm từ 15 xuống 10 tỷ để đảm bảo đủ mã
+MIN_LIQUIDITY_BILLION = 15  # Giá trị giao dịch TB phải > 15 tỷ/phiên
 MIN_PRICE = 10000
+
+
+def _get_top_100_by_liquidity() -> List[str]:
+    """
+    Lấy Top 100 mã thanh khoản cao nhất sàn HOSE một cách ĐỘNG.
+    
+    Logic:
+    1. Lấy danh sách tất cả mã HOSE từ vnstock
+    2. Với mỗi mã, tính thanh khoản = avg_volume(20 ngày) * avg_close(5 ngày)
+    3. Lọc: price > 10,000 VND AND avg_value > 15 tỷ VND
+    4. Sắp xếp giảm dần và trả về Top 100
+    
+    Fallback: Nếu API lỗi, trả về VN30 + Midcap phổ biến
+    """
+    warnings.filterwarnings('ignore')
+    
+    # VN30 + Midcap phổ biến (Fallback an toàn)
+    FALLBACK_SYMBOLS = [
+        # VN30 & Bluechips
+        "VNM", "VCB", "VHM", "VIC", "VPB", "BID", "TCB", "CTG", "MBB", "ACB",
+        "STB", "HPG", "FPT", "MWG", "PNJ", "TPB", "SHB", "SSI", "MSN", "GAS",
+        "PLX", "VRE", "VIB", "SAB", "HDB", "LPB", "SSB", "GVR", "BCM", "VJC",
+        # Midcap - Ngân hàng
+        "OCB", "EIB", "MSB", "NAB", "KLB", "BAB", "PGB", "VBB", "ABB", "BVH",
+        # Midcap - Bất động sản
+        "NVL", "DIG", "DXG", "KDH", "HDG", "IDJ", "SJS", "DPG", "CRE", "NLG",
+        "ASM", "IJC", "KAC", "DPR", "VPH", "PDR", "HII", "SRA", "VIG", "NRC",
+        # Midcap - Chứng khoán
+        "VND", "HCM", "CTS", "VCI", "SHS", "VDS", "BVS", "TVS", "VIX", "APG",
+        "BSI", "CSI", "EVS", "FTS", "HBS", "IVS", "KBS", "MBS", "PHS", "SGB",
+        # Midcap - Sản xuất & Vật liệu
+        "DGC", "GMD", "SBT", "DGW", "CMG", "IMP", "VHC", "REE", "NT2", "DRC",
+        "AAA", "ALT", "AMC", "BMC", "CSV", "DCL", "DHC", "DPM", "DVP", "HAP",
+        # Midcap - Năng lượng & Dịch vụ
+        "POW", "HAG", "BSR", "PVD", "PVC", "OGC", "ASP", "CAV", "CLC", "PLT",
+        # Midcap - Bán lẻ & Tiêu dùng
+        "ELC", "GCC", "HAX", "PET", "QNS", "SAT", "STK", "TMT", "FRT", "MWG",
+        # Midcap - Công nghiệp & Khác
+        "BMI", "CII", "CSM", "DXP", "HHS", "HT1", "KSB", "LIX", "LM8", "MSR",
+        "VGC", "HHV", "LHG", "PVT", "GEX", "TTE", "SZC", "HLD", "NKG", "KHC",
+    ]
+    
+    # Loại bỏ trùng lặp
+    FALLBACK_SYMBOLS = list(dict.fromkeys(FALLBACK_SYMBOLS))
+    
+    try:
+        from vnstock import Quote, Listing
+        
+        # Bước 1: Lấy danh sách mã HOSE từ vnstock
+        print("[Sync] Đang lấy danh sách mã HOSE...")
+        try:
+            listing = Listing(source="vci")
+            all_stocks = listing.all_symbols()
+            
+            if all_stocks is not None and len(all_stocks) > 0:
+                # Lọc chỉ HOSE
+                if 'exchange' in all_stocks.columns:
+                    hose_stocks = all_stocks[all_stocks['exchange'] == 'HOSE']
+                    hose_symbols = hose_stocks['symbol'].tolist()[:500]  # Giới hạn 500 mã để tránh API quá tải
+                elif 'type' in all_stocks.columns:
+                    hose_stocks = all_stocks[all_stocks['type'] == 'STOCK']
+                    hose_symbols = hose_stocks['symbol'].tolist()[:500]
+                else:
+                    hose_symbols = all_stocks['symbol'].tolist()[:500] if 'symbol' in all_stocks.columns else []
+                
+                print(f"[Sync] Tìm thấy {len(hose_symbols)} mã HOSE")
+            else:
+                hose_symbols = FALLBACK_SYMBOLS
+                print("[Sync] Không lấy được danh sách HOSE, dùng fallback")
+        except Exception as e:
+            print(f"[Sync] Lỗi lấy danh sách HOSE: {e}")
+            hose_symbols = FALLBACK_SYMBOLS
+        
+        # Bước 2: Tính thanh khoản cho từng mã
+        print("[Sync] Đang tính thanh khoản cho từng mã...")
+        liquidity_data = []
+        
+        for symbol in hose_symbols:
+            try:
+                q = Quote(symbol=symbol, source="kbs")
+                df = q.history(
+                    start=(datetime.now() - pd.Timedelta(days=30)).strftime("%Y-%m-%d"),
+                    end=datetime.now().strftime("%Y-%m-%d"),
+                    interval="1D"
+                )
+                
+                if df is not None and len(df) >= 10:
+                    # Tính avg_volume (20 ngày) và avg_close (5 ngày)
+                    avg_volume = df['volume'].tail(20).mean()
+                    avg_close = df['close'].tail(5).mean() * 1000  # KBS trả giá đã chia 1000
+                    avg_value = avg_volume * avg_close  # Giá trị giao dịch TB (VND)
+                    avg_value_billion = avg_value / 1e9  # Chuyển sang tỷ VND
+                    
+                    # Lọc điều kiện
+                    if avg_close > MIN_PRICE and avg_value_billion > MIN_LIQUIDITY_BILLION:
+                        liquidity_data.append((symbol, avg_value_billion, avg_close))
+                        
+            except Exception as e:
+                # Bỏ qua mã lỗi, tiếp tục với mã khác
+                continue
+        
+        # Bước 3: Sắp xếp và lấy Top 100
+        liquidity_data.sort(key=lambda x: x[1], reverse=True)
+        top_100 = [s[0] for s in liquidity_data[:UNIVERSE_SIZE]]
+        
+        print(f"[Sync] Đã tìm thấy {len(top_100)} mã đủ điều kiện (price > 10k, avg_value > 15B)")
+        
+        # Nếu không đủ 100 mã, bổ sung từ fallback
+        if len(top_100) < UNIVERSE_SIZE:
+            print(f"[Sync] Chỉ có {len(top_100)} mã đạt điều kiện, bổ sung từ fallback...")
+            for sym in FALLBACK_SYMBOLS:
+                if sym not in top_100:
+                    top_100.append(sym)
+                    if len(top_100) >= UNIVERSE_SIZE:
+                        break
+        
+        # Debug: In top 10
+        print("[Sync] Top 10 mã thanh khoản cao nhất:")
+        for i, (sym, val, price) in enumerate(liquidity_data[:10]):
+            print(f"  {i+1}. {sym}: {val:.1f}B VND/phiên @ {price:,.0f} VND")
+        
+        return top_100[:UNIVERSE_SIZE]
+        
+    except Exception as e:
+        print(f"[Sync] Lỗi nghiêm trọng khi lấy danh sách động: {e}")
+        print("[Sync] Sử dụng danh sách fallback...")
+        return FALLBACK_SYMBOLS[:UNIVERSE_SIZE]
+
+
+def get_top_symbols_by_liquidity() -> List[str]:
+    """Lấy Top 100 mã thanh khoản cao nhất - SỬ DỤNG LOGIC ĐỘNG"""
+    return _get_top_100_by_liquidity()
 
 
 def get_market_rsi() -> float:
@@ -2392,73 +2524,6 @@ def compute_core_logic(
     }
 
 
-def get_top_symbols_by_liquidity() -> List[str]:
-    """Lấy Top 100 mã thanh khoản cao nhất"""
-    warnings.filterwarnings('ignore')
-
-    # Danh sách ~120 mã thanh khoản tốt nhất (không trùng lặp)
-    candidates = [
-        # VN30 & Bluechips
-        "VNM", "VCB", "VHM", "VIC", "VPB", "BID", "TCB", "CTG", "MBB", "ACB",
-        "STB", "HPG", "FPT", "MWG", "PNJ", "TPB", "SHB", "SSI", "MSN", "GAS",
-        "PLX", "VRE", "VIB", "SAB", "HDB", "LPB", "SSB", "GVR", "BCM", "VJC",
-        # Midcap - Ngân hàng
-        "OCB", "EIB", "MSB", "NAB", "KLB", "BAB", "PGB", "VBB", "ABB", "TPB",
-        # Midcap - Bất động sản
-        "NVL", "DIG", "DXG", "KDH", "HDG", "IDJ", "SJS", "DPG", "CRE", "NLG",
-        "ASM", "IJC", "KAC", "DPR", "VPH", "PDR", "BCM", "HII", "SRA", "VIG",
-        # Midcap - Chứng khoán
-        "VND", "HCM", "CTS", "VCI", "SHS", "VDS", "BVS", "TVS", "SSI", "VIX",
-        "APG", "BSI", "CSI", "EVS", "FTS", "HBS", "IVS", "KBS", "MBS", "PHS",
-        # Midcap - Sản xuất & Vật liệu
-        "DGC", "GMD", "SBT", "DGW", "CMG", "IMP", "VHC", "REE", "NT2", "DRC",
-        "AAA", "ALT", "AMC", "BMC", "CSV", "DCL", "DHC", "DPM", "DVP", "HAP",
-        # Midcap - Năng lượng & Dịch vụ
-        "POW", "HAG", "BSR", "PVD", "PVC", "VND", "OGC", "ASP", "CAV", "CLC",
-        # Midcap - Bán lẻ & Tiêu dùng
-        "DGW", "ELC", "GCC", "HAX", "MWG", "PET", "QNS", "SAT", "STK", "TMT",
-        # Midcap - Công nghiệp
-        "BMI", "CII", "CSM", "DXP", "HHS", "HT1", "KSB", "LIX", "LM8", "MSR",
-    ]
-
-    try:
-        from vnstock import Quote
-        liquidity_data = []
-        for symbol in candidates:
-            try:
-                q = Quote(symbol=symbol, source="kbs")
-                df = q.history(
-                    start=(datetime.now() - pd.Timedelta(days=30)).strftime("%Y-%m-%d"),
-                    end=datetime.now().strftime("%Y-%m-%d"),
-                    interval="1D"
-                )
-                if df is not None and len(df) >= 10:
-                    avg_volume = df['volume'].tail(20).mean()
-                    avg_price = df['close'].tail(5).mean() * 1000  # KBS trả giá đã chia 1000
-                    avg_value = avg_volume * avg_price
-
-                    if avg_price > MIN_PRICE and avg_value > MIN_LIQUIDITY_BILLION * 1e9:
-                        liquidity_data.append((symbol, avg_value))
-            except:
-                continue
-
-        liquidity_data.sort(key=lambda x: x[1], reverse=True)
-        top_symbols = [s[0] for s in liquidity_data[:UNIVERSE_SIZE]]
-
-        if len(top_symbols) < 5:
-            print(f"[Sync] Fallback: Chỉ có {len(top_symbols)} mã đủ thanh khoản")
-            top_symbols = candidates[:UNIVERSE_SIZE]
-
-        return top_symbols
-
-    except Exception as e:
-        print(f"[Sync] Error getting symbols: {e}")
-        return [
-            "VNM", "VCB", "VHM", "VIC", "VPB", "BID", "TCB", "CTG", "MBB", "ACB",
-            "STB", "HPG", "FPT", "MWG", "PNJ", "TPB", "SHB", "SSI", "MSN", "GAS",
-        ][:20]
-
-
 def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
     """
     Calculate technical indicators using vnstock_ta
@@ -2886,17 +2951,28 @@ def sync_market_data(mode: str = "full", fast_mode: bool = False) -> Dict[str, A
     """
     start_time = datetime.now()
 
+    # Lấy danh sách symbols TRƯỚC để biết total_symbols chính xác
+    if mode == "analyze":
+        symbols = list(StockData.objects.values_list('symbol', flat=True))
+        print(f"[Sync] Analyze mode: Re-analyzing {len(symbols)} existing symbols")
+    else:
+        symbols = _get_top_100_by_liquidity()  # Sử dụng hàm động
+        print(f"[Sync] Đã lấy {len(symbols)} mã thanh khoản cao nhất")
+
+    # Tạo SyncStatus với đúng số lượng symbols
     sync_record, created = SyncStatus.objects.get_or_create(
         id=1,
         defaults={
             "status": "running",
-            "total_symbols": UNIVERSE_SIZE,
+            "total_symbols": len(symbols),
             "processed_symbols": 0,
             "started_at": timezone.now()
         }
     )
     sync_record.status = "running"
+    sync_record.total_symbols = len(symbols)  # Cập nhật đúng số lượng thực tế
     sync_record.started_at = timezone.now()
+    sync_record.processed_symbols = 0
     sync_record.save()
 
     mode_desc = "FULL" if not fast_mode else "FAST"
@@ -2905,13 +2981,6 @@ def sync_market_data(mode: str = "full", fast_mode: bool = False) -> Dict[str, A
     # Lấy Market RSI
     market_rsi = get_market_rsi()
     print(f"[Sync] Market RSI: {market_rsi:.2f}")
-
-    if mode == "analyze":
-        symbols = list(StockData.objects.values_list('symbol', flat=True))
-        print(f"[Sync] Analyze mode: Re-analyzing {len(symbols)} existing symbols")
-    else:
-        symbols = get_top_symbols_by_liquidity()
-        print(f"[Sync] Got {len(symbols)} symbols")
 
     # Process in batches
     batch_size = 20
@@ -3070,7 +3139,7 @@ def save_results_to_db(results: List[Dict[str, Any]]) -> int:
                     "stock_risk_level": data.get("stock_risk_level", "Medium"),
                     "stock_risk_reason": data.get("stock_risk_reason", ""),
                     "has_inverted_sl": data["has_inverted_sl"],
-                    "is_inverted_risk": data.get("is_inverted_risk", False),
+                    # Note: is_inverted_risk is a local variable in compute_core_logic, not a DB field
                     # New fields
                     "is_safe_entry": data.get("is_safe_entry", False),
                     "has_high_resistance": data.get("has_high_resistance", False),
@@ -3108,8 +3177,8 @@ def save_results_to_db(results: List[Dict[str, Any]]) -> int:
                     "sector_median_pe": data.get("sector_median_pe", 0),
                     "valuation_source": data.get("valuation_source", "static"),
                     "valuation_cap_applied": data.get("valuation_cap_applied", False),
-                    "trend": data["trend"],
-                    "breakout_status": data["breakout_status"],
+                    "trend": data.get("trend", "SIDEWAYS"),
+                    "breakout_status": data.get("breakout_status", ""),
                     "market_rsi": data["market_rsi"],
                 }
             )
