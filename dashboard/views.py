@@ -790,7 +790,7 @@ def stock_list(request: HttpRequest) -> HttpResponse:
     # Get last sync time
     from .models import SyncStatus
     last_sync_obj = SyncStatus.objects.order_by('-started_at').first()
-    last_sync = last_sync_obj.started_at.strftime('%H:%M:%S - %d/%m/%Y') if last_sync_obj else None
+    last_sync = last_sync_obj.started_at.strftime('%H:%M:%S - %d/%m/%Y') if last_sync_obj and last_sync_obj.started_at else None
 
     context = {
         "stocks": stocks,

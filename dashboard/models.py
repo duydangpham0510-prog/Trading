@@ -196,6 +196,7 @@ class StockAnalysis(models.Model):
     is_slow_mode = models.BooleanField(default=False)
     is_high_risk = models.BooleanField(default=False)
     has_inverted_sl = models.BooleanField(default=False)
+    is_inverted_risk = models.BooleanField(default=False, null=True, blank=True)
     
     # NEW: Separated Risk Assessment
     is_market_high_risk = models.BooleanField(default=False)  # VNIndex RSI > 80
